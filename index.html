@@ -177,7 +177,7 @@ const lightBuffer = document.createElement('canvas');
 const lbCtx = lightBuffer.getContext('2d');
 
 let W, H;
-let gameState = "CUTSCENE_SENTENCE", timer = 0;
+let gameState = "TITLE_SCREEN", timer = 0;
 const TILE = 60;
 // Reduced DELAY because at 30fps, 120 frames is 4 seconds. 
 // 60 frames = 2 seconds (original behavior).
@@ -205,6 +205,17 @@ const joystick = {
     deadZone: 8
 };
 const jumpPointers = new Set();
+
+let mp = null;
+let lobbyState = "idle"; // idle, creating, joining, waiting, countdown
+let lobbyStatus = "";
+let lobbyError = "";
+let lobbyInput = "";
+let lobbyCountdown = 0;
+let lobbyCountdownStart = 0;
+let disconnectTimer = null;
+let toastText = "";
+let toastTtl = 0;
 
 let audioCtx = null, masterGain = null;
 let ambientGainNode = null;
@@ -524,14 +535,26 @@ function checkTriggers() {
 }
 
 function transitionLevel(nextIndex) {
-    if (nextIndex >= levels.length) return;
+    if (nextIndex >= levels.length) {
+        // Victory
+        if (mp && mp.active && mp.role === "main") {
+            mpSend({ type: "win" });
+        }
+        gameState = "VICTORY";
+        return;
+    }
     const previousLevel = currentLevel;
     if (audioCtx && nextIndex > previousLevel) playSound("level");
+    // Main player in multiplayer: notify clone of level change
+    if (mp && mp.active && mp.role === "main") {
+        mpSend({ type: "level", index: nextIndex });
+    }
     currentLevel = nextIndex;
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
     p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0; ghost.fade = 0;
+    if (mp) { mp.stateBuffer.length = 0; mp.fadeIn = 0; }
     particles.length = 0;
     document.getElementById("game-ui").style.display = "block";
     if (currentLevel === 0) maybeStartCellNoiseSequence();
@@ -542,13 +565,16 @@ function respawnAtLevelStart() {
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
     p.coyoteFrames = 0;
-    p.history = [];
-    ghost.active = false;
-    ghost.x = -100; ghost.y = -100;
-    ghost.dirX = 1; ghost.dirY = 0;
-    ghost.springCompression = 0;
-    ghost.springCooldown = 0;
-    ghost.fade = 0;
+    const isMainMp = mp && mp.active && mp.role === "main";
+    if (!isMainMp) {
+        p.history = [];
+        ghost.active = false;
+        ghost.x = -100; ghost.y = -100;
+        ghost.dirX = 1; ghost.dirY = 0;
+        ghost.springCompression = 0;
+        ghost.springCooldown = 0;
+        ghost.fade = 0;
+    }
     particles.length = 0;
     playSound("respawn");
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
@@ -997,20 +1023,27 @@ jumpBtn.addEventListener("lostpointercapture", releaseJumpPointer);
 jumpBtn.addEventListener("contextmenu", e => e.preventDefault());
 
 modeBtn.addEventListener("click", () => {
+    if (mp && mp.active && mp.role === "main") return;
     cycleToNextUnlockedMode();
 });
 teleportBtn.addEventListener("click", () => {
+    if (mp && mp.active && mp.role === "clone") return;
     teleportToGhost();
 });
 
 window.onkeydown = e => {
+    if (gameState === "LOBBY") return;
     ensureAudio();
     startAmbientMusic();
     keys[e.code] = true;
-    if (e.key === "1") setMode(0);
-    if (e.key === "2") trySelectMode(1);
-    if (e.key === "3") trySelectMode(2);
-    if(e.code === "KeyS") teleportToGhost();
+    const isMainMp = mp && mp.active && mp.role === "main";
+    const isCloneMp = mp && mp.active && mp.role === "clone";
+    if (!isMainMp) {
+        if (e.key === "1") setMode(0);
+        if (e.key === "2") trySelectMode(1);
+        if (e.key === "3") trySelectMode(2);
+    }
+    if (!isCloneMp && e.code === "KeyS") teleportToGhost();
 };
 window.onkeyup = e => keys[e.code] = false;
 
@@ -1082,16 +1115,31 @@ function unlockModeFromModule(modeIndex) {
 }
 
 function teleportToGhost() {
-    if (!ghost.active || ghost.mode !== 2 || gameState !== "PLAYING") return;
-    ensureAudio();
-    const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
-    p.x = ghost.x;
-    p.y = ghost.y;
-    p.vx = 0; p.vy = 0;
-    const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
-    emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
-    emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
-    playSound("swap");
+    if (gameState !== "PLAYING") return;
+    const isMainMp = mp && mp.active && mp.role === "main";
+    if (isMainMp) {
+        if (!mp.connected || mp.partnerMode !== 2) return;
+        ensureAudio();
+        const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
+        p.x = mp.partnerPos.x;
+        p.y = mp.partnerPos.y;
+        p.vx = 0; p.vy = 0;
+        const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
+        emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
+        emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
+        playSound("swap");
+    } else {
+        if (!ghost.active || ghost.mode !== 2) return;
+        ensureAudio();
+        const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
+        p.x = ghost.x;
+        p.y = ghost.y;
+        p.vx = 0; p.vy = 0;
+        const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
+        emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
+        emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
+        playSound("swap");
+    }
 }
 
 function setMode(m) {
@@ -1135,7 +1183,12 @@ function getBounceSpringMetrics() {
 }
 
 function handleBounceSpringInteraction() {
-    if (!ghost.active || ghost.mode !== 0) return;
+    const isMainMp = mp && mp.active && mp.role === "main";
+    if (isMainMp) {
+        if (!mp.connected || mp.partnerMode !== 0) return;
+    } else {
+        if (!ghost.active || ghost.mode !== 0) return;
+    }
     const spring = getBounceSpringMetrics();
     const springTopY = ghost.y - spring.baseHeight - spring.coilHeight - spring.headHeight;
     const boundsX = ghost.x;
@@ -1449,6 +1502,434 @@ function drawGhostTrajectoryWorld() {
     ctx.restore();
 }
 
+// === MULTIPLAYER CONNECTION ===
+function getServerUrl() {
+    const loc = window.location;
+    const proto = loc.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + loc.hostname + ":3000";
+}
+
+function createMpObject() {
+    return {
+        active: false,
+        ws: null,
+        role: null,
+        roomCode: null,
+        partnerPos: { x: 0, y: 0 },
+        partnerDir: 1,
+        partnerGrounded: false,
+        partnerMode: 0,
+        stateBuffer: [],
+        connected: false,
+        fadeIn: 0
+    };
+}
+
+function mpConnect(action) {
+    mp = createMpObject();
+    lobbyError = "";
+    try {
+        mp.ws = new WebSocket(getServerUrl());
+    } catch {
+        lobbyError = "Server unavailable";
+        lobbyState = "idle";
+        return;
+    }
+    mp.ws.onopen = () => {
+        if (action === "create") {
+            mp.ws.send(JSON.stringify({ type: "create" }));
+            lobbyState = "waiting";
+            lobbyStatus = "Creating room...";
+        } else {
+            mp.ws.send(JSON.stringify({ type: "join", code: lobbyInput.toUpperCase() }));
+            lobbyState = "waiting";
+            lobbyStatus = "Joining room...";
+        }
+    };
+    mp.ws.onmessage = e => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        handleMpMessage(msg);
+    };
+    mp.ws.onclose = () => {
+        if (gameState === "LOBBY") {
+            lobbyError = "Server unavailable";
+            lobbyState = "idle";
+        }
+    };
+    mp.ws.onerror = () => {
+        lobbyError = "Server unavailable";
+        lobbyState = "idle";
+    };
+}
+
+function handleMpMessage(msg) {
+    if (msg.type === "created") {
+        mp.roomCode = msg.code;
+        lobbyStatus = "Room: " + msg.code + " - Waiting for partner...";
+    } else if (msg.type === "joined") {
+        mp.role = msg.role;
+    } else if (msg.type === "start") {
+        mp.connected = true;
+        mp.active = true;
+        lobbyStatus = "Connected!";
+        lobbyState = "countdown";
+        lobbyCountdown = 3;
+        lobbyCountdownStart = Date.now();
+    } else if (msg.type === "error") {
+        lobbyError = msg.message;
+        lobbyState = "idle";
+    } else if (msg.type === "pos" && mp.active && mp.role === "main") {
+        mp.partnerPos.x = msg.x;
+        mp.partnerPos.y = msg.y;
+        mp.partnerMode = msg.mode;
+        mp.partnerDir = msg.dirX;
+    } else if (msg.type === "state" && mp.active && mp.role === "clone") {
+        mp.stateBuffer.push({
+            x: msg.x, y: msg.y, vx: msg.vx, vy: msg.vy,
+            dirX: msg.dirX, grounded: msg.grounded, level: msg.level,
+            t: Date.now()
+        });
+        const maxBuffer = 150;
+        while (mp.stateBuffer.length > maxBuffer) mp.stateBuffer.shift();
+    } else if (msg.type === "level" && mp.active && mp.role === "clone") {
+        transitionLevel(msg.index);
+        mp.stateBuffer.length = 0;
+        mp.fadeIn = 0;
+    } else if (msg.type === "win" && mp.active) {
+        gameState = "VICTORY";
+    } else if (msg.type === "partner_disconnected" && mp.active) {
+        handleDisconnect();
+    }
+}
+
+function handleDisconnect() {
+    if (mp.role === "main") {
+        toastText = "Connection lost - reverting to solo";
+        toastTtl = 150;
+        mp.active = false;
+        mp.connected = false;
+        if (mp.ws) mp.ws.close();
+        mp = null;
+    } else {
+        toastText = "Partner disconnected";
+        toastTtl = 150;
+        mp.active = false;
+        mp.connected = false;
+        if (mp.ws) mp.ws.close();
+        disconnectTimer = setTimeout(() => {
+            mp = null;
+            gameState = "TITLE_SCREEN";
+            timer = 0;
+            lobbyState = "idle";
+            lobbyStatus = "";
+            lobbyError = "";
+        }, 3000);
+    }
+}
+
+function mpSend(data) {
+    if (mp && mp.ws && mp.ws.readyState === 1) {
+        mp.ws.send(JSON.stringify(data));
+    }
+}
+
+function closeMpConnection() {
+    if (mp && mp.ws) {
+        mp.ws.close();
+    }
+    mp = null;
+}
+
+function getDelayedPartnerState() {
+    if (!mp || mp.stateBuffer.length < 2) return null;
+    const now = Date.now();
+    const delayMs = 2000;
+    const targetTime = now - delayMs;
+    let i = 0;
+    while (i < mp.stateBuffer.length - 1 && mp.stateBuffer[i + 1].t <= targetTime) i++;
+    if (mp.stateBuffer[i].t > targetTime) return null;
+    if (i >= mp.stateBuffer.length - 1) {
+        const s = mp.stateBuffer[i];
+        if (s.t <= targetTime) return s;
+        return null;
+    }
+    const a = mp.stateBuffer[i];
+    const b = mp.stateBuffer[i + 1];
+    if (b.t <= targetTime) {
+        while (mp.stateBuffer.length > 2 && mp.stateBuffer[1].t <= targetTime) mp.stateBuffer.shift();
+        return b;
+    }
+    const frac = (targetTime - a.t) / Math.max(1, b.t - a.t);
+    return {
+        x: a.x + (b.x - a.x) * frac,
+        y: a.y + (b.y - a.y) * frac,
+        vx: a.vx + (b.vx - a.vx) * frac,
+        vy: a.vy + (b.vy - a.vy) * frac,
+        dirX: frac < 0.5 ? a.dirX : b.dirX,
+        grounded: frac < 0.5 ? a.grounded : b.grounded,
+        level: b.level,
+        t: targetTime
+    };
+}
+
+// === TITLE SCREEN & LOBBY RENDERING ===
+let titleButtons = [];
+let lobbyButtons = [];
+let lobbyInputActive = false;
+
+function renderTitleScreen() {
+    ctx.fillStyle = "#030305";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign = "center";
+
+    // Title
+    ctx.font = "bold 72px Courier New";
+    ctx.fillStyle = "#f0f";
+    ctx.shadowColor = "#f0f";
+    ctx.shadowBlur = 30;
+    ctx.fillText("ECHO", W / 2, H * 0.32);
+    ctx.shadowBlur = 0;
+
+    ctx.font = "14px Courier New";
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.fillText("TEMPORAL RECURSION TETHER", W / 2, H * 0.32 + 34);
+
+    // Buttons
+    const btnW = 220, btnH = 50, gap = 20;
+    const startY = H * 0.52;
+
+    titleButtons = [
+        { label: "SOLO", x: W / 2 - btnW / 2, y: startY, w: btnW, h: btnH, action: "solo" },
+        { label: "MULTIPLAYER", x: W / 2 - btnW / 2, y: startY + btnH + gap, w: btnW, h: btnH, action: "multi" }
+    ];
+
+    titleButtons.forEach(btn => {
+        ctx.fillStyle = "rgba(255,255,255,0.06)";
+        ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.strokeStyle = "rgba(255,255,255,0.3)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 18px Courier New";
+        ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 + 6);
+    });
+
+    ctx.restore();
+}
+
+function renderLobby() {
+    ctx.fillStyle = "#030305";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.textAlign = "center";
+
+    ctx.font = "bold 36px Courier New";
+    ctx.fillStyle = "#f0f";
+    ctx.shadowColor = "#f0f";
+    ctx.shadowBlur = 20;
+    ctx.fillText("MULTIPLAYER", W / 2, H * 0.2);
+    ctx.shadowBlur = 0;
+
+    const btnW = 220, btnH = 50, gap = 16;
+    const startY = H * 0.33;
+
+    lobbyButtons = [];
+
+    if (lobbyState === "idle") {
+        lobbyButtons.push(
+            { label: "CREATE ROOM", x: W / 2 - btnW / 2, y: startY, w: btnW, h: btnH, action: "create" },
+            { label: "JOIN ROOM", x: W / 2 - btnW / 2, y: startY + btnH + gap, w: btnW, h: btnH, action: "join_toggle" },
+            { label: "BACK", x: W / 2 - btnW / 2, y: startY + (btnH + gap) * 2, w: btnW, h: btnH, action: "back" }
+        );
+    } else if (lobbyState === "input") {
+        // Room code input
+        ctx.font = "16px Courier New";
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        ctx.fillText("Enter room code:", W / 2, startY - 10);
+
+        const inputW = 200, inputH = 44;
+        const inputX = W / 2 - inputW / 2, inputY = startY + 6;
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        ctx.fillRect(inputX, inputY, inputW, inputH);
+        ctx.strokeStyle = lobbyInputActive ? "#f0f" : "rgba(255,255,255,0.3)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(inputX, inputY, inputW, inputH);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 24px Courier New";
+        ctx.fillText(lobbyInput.toUpperCase() + (Math.floor(Date.now() / 500) % 2 === 0 ? "_" : ""), W / 2, inputY + inputH / 2 + 8);
+
+        lobbyButtons.push(
+            { label: "CONNECT", x: W / 2 - btnW / 2, y: inputY + inputH + gap, w: btnW, h: btnH, action: "join_connect" },
+            { label: "BACK", x: W / 2 - btnW / 2, y: inputY + inputH + gap + btnH + gap, w: btnW, h: btnH, action: "back" }
+        );
+        lobbyInputActive = true;
+    } else if (lobbyState === "waiting" || lobbyState === "countdown") {
+        ctx.font = "16px Courier New";
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        ctx.fillText(lobbyStatus, W / 2, startY + 20);
+
+        if (lobbyState === "countdown") {
+            const elapsed = (Date.now() - lobbyCountdownStart) / 1000;
+            const remaining = Math.max(0, Math.ceil(3 - elapsed));
+            ctx.font = "bold 64px Courier New";
+            ctx.fillStyle = "#f0f";
+            ctx.shadowColor = "#f0f";
+            ctx.shadowBlur = 20;
+            ctx.fillText(remaining > 0 ? remaining.toString() : "GO!", W / 2, startY + 100);
+            ctx.shadowBlur = 0;
+
+            if (elapsed >= 3) {
+                gameState = "CUTSCENE_SENTENCE";
+                timer = 0;
+            }
+        }
+
+        lobbyButtons.push(
+            { label: "BACK", x: W / 2 - btnW / 2, y: H * 0.75, w: btnW, h: btnH, action: "back" }
+        );
+    }
+
+    // Draw buttons
+    lobbyButtons.forEach(btn => {
+        ctx.fillStyle = "rgba(255,255,255,0.06)";
+        ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.strokeStyle = "rgba(255,255,255,0.3)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 16px Courier New";
+        ctx.textAlign = "center";
+        ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 + 6);
+    });
+
+    // Error text
+    if (lobbyError) {
+        ctx.fillStyle = "#f44";
+        ctx.font = "14px Courier New";
+        ctx.textAlign = "center";
+        ctx.fillText(lobbyError, W / 2, H * 0.88);
+    }
+
+    ctx.restore();
+}
+
+function handleTitleClick(x, y) {
+    for (const btn of titleButtons) {
+        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+            if (btn.action === "solo") {
+                gameState = "CUTSCENE_SENTENCE";
+                timer = 0;
+            } else if (btn.action === "multi") {
+                gameState = "LOBBY";
+                lobbyState = "idle";
+                lobbyError = "";
+                lobbyInput = "";
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+function handleLobbyClick(x, y) {
+    for (const btn of lobbyButtons) {
+        if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+            if (btn.action === "create") {
+                mpConnect("create");
+            } else if (btn.action === "join_toggle") {
+                lobbyState = "input";
+                lobbyInput = "";
+                lobbyInputActive = true;
+            } else if (btn.action === "join_connect") {
+                if (lobbyInput.length === 6) {
+                    mpConnect("join");
+                } else {
+                    lobbyError = "Enter a 6-character room code";
+                }
+            } else if (btn.action === "back") {
+                closeMpConnection();
+                if (lobbyState === "input") {
+                    lobbyState = "idle";
+                    lobbyInputActive = false;
+                } else {
+                    gameState = "TITLE_SCREEN";
+                    lobbyState = "idle";
+                    lobbyStatus = "";
+                    lobbyError = "";
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+canvas.addEventListener("pointerdown", e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (gameState === "TITLE_SCREEN") handleTitleClick(x, y);
+    else if (gameState === "LOBBY") handleLobbyClick(x, y);
+});
+
+window.addEventListener("keydown", e => {
+    if (gameState === "LOBBY" && lobbyInputActive) {
+        if (e.key === "Backspace") {
+            lobbyInput = lobbyInput.slice(0, -1);
+            e.preventDefault();
+        } else if (e.key === "Enter" && lobbyInput.length === 6) {
+            mpConnect("join");
+            e.preventDefault();
+        } else if (/^[a-zA-Z0-9]$/.test(e.key) && lobbyInput.length < 6) {
+            lobbyInput += e.key.toUpperCase();
+            e.preventDefault();
+        }
+    }
+});
+
+// === VICTORY SCREEN ===
+function renderVictory() {
+    ctx.fillStyle = "#030305";
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.font = "bold 48px Courier New";
+    ctx.fillStyle = "#0ff";
+    ctx.shadowColor = "#0ff";
+    ctx.shadowBlur = 25;
+    ctx.fillText("ESCAPE SUCCESSFUL", W / 2, H * 0.4);
+    ctx.shadowBlur = 0;
+    ctx.font = "16px Courier New";
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    if (mp && mp.active) {
+        ctx.fillText("You and your partner escaped the facility.", W / 2, H * 0.5);
+    } else {
+        ctx.fillText("Inmate 734-C has escaped the facility.", W / 2, H * 0.5);
+    }
+    ctx.restore();
+}
+
+// === TOAST RENDERING ===
+function drawToast() {
+    if (toastTtl <= 0) return;
+    const alpha = Math.min(1, toastTtl / 30);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px Courier New";
+    const tw = ctx.measureText(toastText).width + 40;
+    ctx.fillRect(W / 2 - tw / 2, 50, tw, 36);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(toastText, W / 2, 74);
+    ctx.restore();
+    toastTtl--;
+}
+
 function update(currentTime) {
     const deltaTime = currentTime - lastTime;
 
@@ -1456,20 +1937,45 @@ function update(currentTime) {
         lastTime = currentTime - (deltaTime % interval);
         
         timer++;
-        if (gameState === "CUTSCENE_SENTENCE") {
+        if (gameState === "TITLE_SCREEN") {
+            setTouchControlsVisible(false);
+            document.getElementById("game-ui").style.display = "none";
+            renderTitleScreen();
+        } else if (gameState === "LOBBY") {
+            setTouchControlsVisible(false);
+            document.getElementById("game-ui").style.display = "none";
+            renderLobby();
+        } else if (gameState === "CUTSCENE_SENTENCE") {
             setTouchControlsVisible(false);
             ctx.fillStyle = "black"; ctx.fillRect(0,0,W,H);
             ctx.fillStyle = "#f00"; ctx.font = "16px Courier New";
-            if (timer > 30) ctx.fillText("> INMATE 734-C: PROCESSING...", 50, 100);
-            if (timer > 90) ctx.fillText("> PENALTY: TEMPORAL RECURSION TETHER", 50, 130);
-            if (timer > 150) ctx.fillText("> TETHER STATUS: LOCKED TO 120ms OFFSET", 50, 160);
+            if (mp && mp.active && mp.role === "clone") {
+                if (timer > 30) ctx.fillText("> ECHO PROTOCOL: ACTIVE", 50, 100);
+                if (timer > 90) ctx.fillText("> You are the echo.", 50, 130);
+                if (timer > 150) ctx.fillText("> Your partner sees you in real-time, but you see", 50, 160);
+                if (timer > 155) ctx.fillText("  them 2 seconds behind. Help them escape.", 50, 185);
+            } else {
+                if (timer > 30) ctx.fillText("> INMATE 734-C: PROCESSING...", 50, 100);
+                if (timer > 90) ctx.fillText("> PENALTY: TEMPORAL RECURSION TETHER", 50, 130);
+                if (timer > 150) ctx.fillText("> TETHER STATUS: LOCKED TO 120ms OFFSET", 50, 160);
+            }
             if (timer > 250) {
                 gameState = "PLAYING";
+                if (mp && mp.active && mp.role === "clone") {
+                    unlockedModes.add(0);
+                    unlockedModes.add(1);
+                    unlockedModes.add(2);
+                    setMode(0);
+                }
                 transitionLevel(0);
             }
         } else if (gameState === "PLAYING") {
             setTouchControlsVisible(true);
             renderLevel();
+            drawToast();
+        } else if (gameState === "VICTORY") {
+            setTouchControlsVisible(false);
+            renderVictory();
         }
     }
     requestAnimationFrame(update);
@@ -1477,6 +1983,10 @@ function update(currentTime) {
 
 function renderLevel() {
     const levelCfg = levels[currentLevel];
+    const isMainMp = mp && mp.active && mp.role === "main";
+    const isCloneMp = mp && mp.active && mp.role === "clone";
+    const isMp = isMainMp || isCloneMp;
+
     if (p.grounded) p.coyoteFrames = COYOTE_FRAMES;
     else p.coyoteFrames = Math.max(0, p.coyoteFrames - 1);
 
@@ -1486,7 +1996,7 @@ function renderLevel() {
         if (ghost.springCompression < 0.001) ghost.springCompression = 0;
     }
 
-    if (keys["ArrowLeft"] || virtualInput.left) p.vx -= 1.8; 
+    if (keys["ArrowLeft"] || virtualInput.left) p.vx -= 1.8;
     if (keys["ArrowRight"] || virtualInput.right) p.vx += 1.8;
     if (p.grounded) p.coyote = COYOTE_FRAMES;
     else if (p.coyote > 0) p.coyote--;
@@ -1513,27 +2023,65 @@ function renderLevel() {
         );
         if (timer - lastFootstepFrame > 9) { playSound("step"); lastFootstepFrame = timer; }
     }
-    
-    p.history.push({ x: p.x, y: p.y });
-    document.getElementById("buff").innerText = Math.min(100, Math.floor(p.history.length/DELAY*100)) + "%";
-    if (p.history.length > DELAY) {
-        let past = p.history.shift();
-        const wasActive = ghost.active;
-        if (ghost.active) {
-            let dx = past.x - ghost.x;
-            let dy = past.y - ghost.y;
-            if (dx !== 0 || dy !== 0) {
-                ghost.dirX = dx;
-                ghost.dirY = dy;
-            }
-        }
-        ghost.x = past.x; ghost.y = past.y; ghost.active = true;
-        if (!wasActive) ghost.fade = 0;
-    }
-    if (ghost.active) ghost.fade = Math.min(1, (ghost.fade || 0) + 0.05);
-    else ghost.fade = 0;
 
-    if (ghost.active && ghost.mode === 1 && Math.random() < 0.5) {
+    // === GHOST / PARTNER UPDATE ===
+    if (isMainMp) {
+        // Main player in multiplayer: ghost data comes from clone's real-time position
+        p.history.push({ x: p.x, y: p.y }); // Keep history for disconnect fallback
+        if (mp.partnerPos.x !== 0 || mp.partnerPos.y !== 0) {
+            const wasActive = ghost.active;
+            if (ghost.active) {
+                let dx = mp.partnerPos.x - ghost.x;
+                let dy = mp.partnerPos.y - ghost.y;
+                if (dx !== 0 || dy !== 0) { ghost.dirX = dx; ghost.dirY = dy; }
+            }
+            ghost.x = mp.partnerPos.x;
+            ghost.y = mp.partnerPos.y;
+            ghost.mode = mp.partnerMode;
+            ghost.active = true;
+            if (!wasActive) mp.fadeIn = 0;
+            mp.fadeIn = Math.min(1, (mp.fadeIn || 0) + 0.05);
+            ghost.fade = mp.fadeIn;
+        }
+        // Reset spring when partner changes away from BOUNCE
+        if (ghost.mode !== 0) {
+            ghost.springCompression = 0;
+            ghost.springCooldown = 0;
+        }
+        // Send state to clone
+        mpSend({ type: "state", x: p.x, y: p.y, vx: p.vx, vy: p.vy, dirX: p.vx >= 0 ? 1 : -1, grounded: p.grounded, level: currentLevel });
+    } else if (isCloneMp) {
+        // Clone player: send own position, consume delayed main player state
+        mpSend({ type: "pos", x: p.x, y: p.y, mode: ghost.mode, dirX: p.vx >= 0 ? 1 : -1 });
+        const delayed = getDelayedPartnerState();
+        if (delayed) {
+            mp.partnerPos.x = delayed.x;
+            mp.partnerPos.y = delayed.y;
+            mp.partnerDir = delayed.dirX;
+            mp.partnerGrounded = delayed.grounded;
+            mp.fadeIn = Math.min(1, (mp.fadeIn || 0) + 0.05);
+        }
+    } else {
+        // Solo mode: original ghost behavior
+        p.history.push({ x: p.x, y: p.y });
+        document.getElementById("buff").innerText = Math.min(100, Math.floor(p.history.length/DELAY*100)) + "%";
+        if (p.history.length > DELAY) {
+            let past = p.history.shift();
+            const wasActive = ghost.active;
+            if (ghost.active) {
+                let dx = past.x - ghost.x;
+                let dy = past.y - ghost.y;
+                if (dx !== 0 || dy !== 0) { ghost.dirX = dx; ghost.dirY = dy; }
+            }
+            ghost.x = past.x; ghost.y = past.y; ghost.active = true;
+            if (!wasActive) ghost.fade = 0;
+        }
+        if (ghost.active) ghost.fade = Math.min(1, (ghost.fade || 0) + 0.05);
+        else ghost.fade = 0;
+    }
+
+    // Ghost SUPER-LIGHT particles (solo + main player sees clone glow)
+    if (!isCloneMp && ghost.active && ghost.mode === 1 && Math.random() < 0.5) {
         spawnParticle(
             ghost.x + 17 + rand(-12, 12),
             ghost.y + 24 + rand(-10, 10),
@@ -1544,40 +2092,113 @@ function renderLevel() {
             "#ffe36a"
         );
     }
+    // Clone in SUPER-LIGHT: emit particles on own position
+    if (isCloneMp && ghost.mode === 1 && Math.random() < 0.5) {
+        spawnParticle(
+            p.x + 17 + rand(-12, 12),
+            p.y + 24 + rand(-10, 10),
+            rand(-0.2, 0.2),
+            rand(-0.9, -0.25),
+            rand(16, 34),
+            rand(1, 2.3),
+            "#ffe36a"
+        );
+    }
 
+    // === PHYSICS RESOLVE ===
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
-    handleBounceSpringInteraction();
-    teleportBtn.classList.toggle("enabled", ghost.active && ghost.mode === 2);
-    collectUpgradeModules();
-    if (checkSpikeCollision()) return;
+
+    // === INTERACTIONS (role-dependent) ===
+    if (!isCloneMp) {
+        handleBounceSpringInteraction();
+        collectUpgradeModules();
+        if (checkSpikeCollision()) return;
+    }
+
+    // Teleport button state
+    if (isMainMp) {
+        teleportBtn.classList.toggle("enabled", mp.connected && mp.partnerMode === 2);
+    } else if (!isCloneMp) {
+        teleportBtn.classList.toggle("enabled", ghost.active && ghost.mode === 2);
+    }
+
+    // OOB check
     let currentMap = getMap();
     let maxX = currentMap[0].length * TILE;
     let maxY = currentMap.length * TILE;
     if (p.x < -TILE * 2 || p.x > maxX + TILE * 2 || p.y < -TILE * 4 || p.y > maxY + TILE * 3) {
-        respawnAtLevelStart();
+        if (isCloneMp) {
+            let spawn = levels[currentLevel].spawn;
+            p.x = spawn.x * TILE; p.y = spawn.y * TILE;
+            p.vx = 0; p.vy = 0; p.grounded = false;
+        } else {
+            respawnAtLevelStart();
+        }
     }
+
+    // Camera follows player (clone follows self)
     camera.x += (p.x - W/2 - camera.x) * 0.1; camera.y += (p.y - H/2 - camera.y) * 0.1;
 
-    checkTriggers();
+    // Triggers (not for clone)
+    if (!isCloneMp) {
+        checkTriggers();
+    }
 
+    // Level transition: main player sends level change in multiplayer
+    // (checkTriggers already calls transitionLevel; we hook the send in transitionLevel)
+
+    // === RENDERING ===
     ctx.fillStyle = "#030305"; ctx.fillRect(0,0,W,H);
     ctx.save(); ctx.translate(-camera.x, -camera.y);
     drawOutOfBoundsBlocks();
     getMap().forEach((row, r) => row.forEach((cell, c) => drawEnvironment(cell, c, r)));
-    drawGhostTrajectoryWorld();
-    if (ghost.active) drawDroid(ghost.x, ghost.y, true);
-    drawDroid(p.x, p.y, false);
+
+    if (isCloneMp) {
+        // Clone: draw delayed main player as normal character, draw self as ghost
+        if (mp.fadeIn > 0.001 && (mp.partnerPos.x !== 0 || mp.partnerPos.y !== 0)) {
+            ctx.save();
+            ctx.globalAlpha = mp.fadeIn;
+            drawDroid(mp.partnerPos.x, mp.partnerPos.y, false);
+            ctx.restore();
+        }
+        // Draw self as ghost (semi-transparent, mode-colored)
+        const origFade = ghost.fade;
+        ghost.fade = 1;
+        ghost.x = p.x; ghost.y = p.y;
+        ghost.active = true;
+        drawDroid(p.x, p.y, true);
+        ghost.fade = origFade;
+    } else {
+        // Solo or main player
+        if (!isMp) drawGhostTrajectoryWorld();
+        if (ghost.active) drawDroid(ghost.x, ghost.y, true);
+        drawDroid(p.x, p.y, false);
+    }
+
     ctx.restore();
     updateAndDrawParticles();
 
+    // === LIGHTING PASS ===
     lbCtx.globalCompositeOperation = "source-over";
     lbCtx.clearRect(0, 0, W, H);
     lbCtx.fillStyle = "rgba(0,0,0," + (levelCfg.darknessAlpha ?? 0.22) + ")"; lbCtx.fillRect(0,0,W,H);
     lbCtx.globalCompositeOperation = "destination-out";
+
+    // Player light source
     const playerLightRadius = levelCfg.playerLightRadius || 250;
-    let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, playerLightRadius);
+    let plx = p.x - camera.x + 17, ply = p.y - camera.y + 24;
+    let pG = lbCtx.createRadialGradient(plx, ply, 0, plx, ply, playerLightRadius);
     pG.addColorStop(0, "white"); pG.addColorStop(1, "transparent");
-    lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, playerLightRadius, 0, Math.PI*2); lbCtx.fill();
+    lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(plx, ply, playerLightRadius, 0, Math.PI*2); lbCtx.fill();
+
+    // Delayed main player light (clone sees)
+    if (isCloneMp && mp.fadeIn > 0.001 && (mp.partnerPos.x !== 0 || mp.partnerPos.y !== 0)) {
+        const dplx = mp.partnerPos.x - camera.x + 17, dply = mp.partnerPos.y - camera.y + 24;
+        let dpG = lbCtx.createRadialGradient(dplx, dply, 0, dplx, dply, 250);
+        dpG.addColorStop(0, "rgba(255,255,255," + mp.fadeIn + ")");
+        dpG.addColorStop(1, "transparent");
+        lbCtx.fillStyle = dpG; lbCtx.beginPath(); lbCtx.arc(dplx, dply, 250, 0, Math.PI*2); lbCtx.fill();
+    }
 
     let lm = getMap();
     if (levelCfg.moduleBeacon) {
@@ -1600,17 +2221,20 @@ function renderLevel() {
         }
     }
 
-    if (ghost.active && ghost.mode === 1) {
-        const fade = ghost.fade || 0;
-        if (fade > 0.001) {
-            let gRadius = 260;
-            let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius);
-            gG.addColorStop(0, "rgba(255,255,255," + (0.95 * fade) + ")");
-            gG.addColorStop(0.35, "rgba(255,255,255," + (0.42 * fade) + ")");
-            gG.addColorStop(0.78, "rgba(255,255,255," + (0.1 * fade) + ")");
-            gG.addColorStop(1, "transparent");
-            lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius, 0, Math.PI*2); lbCtx.fill();
-        }
+    // Ghost SUPER-LIGHT lighting
+    const ghostLightActive = isCloneMp ? (ghost.mode === 1) : (ghost.active && ghost.mode === 1);
+    const ghostLightFade = isCloneMp ? 1 : (ghost.fade || 0);
+    const ghostLightX = isCloneMp ? (p.x - camera.x + 17) : (ghost.x - camera.x + 17);
+    const ghostLightY = isCloneMp ? (p.y - camera.y + 24) : (ghost.y - camera.y + 24);
+
+    if (ghostLightActive && ghostLightFade > 0.001) {
+        let gRadius = 260;
+        let gG = lbCtx.createRadialGradient(ghostLightX, ghostLightY, 0, ghostLightX, ghostLightY, gRadius);
+        gG.addColorStop(0, "rgba(255,255,255," + (0.95 * ghostLightFade) + ")");
+        gG.addColorStop(0.35, "rgba(255,255,255," + (0.42 * ghostLightFade) + ")");
+        gG.addColorStop(0.78, "rgba(255,255,255," + (0.1 * ghostLightFade) + ")");
+        gG.addColorStop(1, "transparent");
+        lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghostLightX, ghostLightY, gRadius, 0, Math.PI*2); lbCtx.fill();
     }
 
     let t = Date.now() * 0.001;
@@ -1647,19 +2271,15 @@ function renderLevel() {
     }
 
     lbCtx.globalCompositeOperation = "destination-out";
-    if (ghost.active && ghost.mode === 1) {
-        const fade = ghost.fade || 0;
-        if (fade > 0.001) {
-            let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
-            let superTint = lbCtx.createRadialGradient(gx, gy - 80, 0, gx, gy, 420);
-            superTint.addColorStop(0, "rgba(255,255,255," + (0.24 * fade) + ")");
-            superTint.addColorStop(0.5, "rgba(255,255,255," + (0.1 * fade) + ")");
-            superTint.addColorStop(1, "transparent");
-            lbCtx.fillStyle = superTint;
-            lbCtx.beginPath();
-            lbCtx.arc(gx, gy, 420, 0, Math.PI * 2);
-            lbCtx.fill();
-        }
+    if (ghostLightActive && ghostLightFade > 0.001) {
+        let superTint = lbCtx.createRadialGradient(ghostLightX, ghostLightY - 80, 0, ghostLightX, ghostLightY, 420);
+        superTint.addColorStop(0, "rgba(255,255,255," + (0.24 * ghostLightFade) + ")");
+        superTint.addColorStop(0.5, "rgba(255,255,255," + (0.1 * ghostLightFade) + ")");
+        superTint.addColorStop(1, "transparent");
+        lbCtx.fillStyle = superTint;
+        lbCtx.beginPath();
+        lbCtx.arc(ghostLightX, ghostLightY, 420, 0, Math.PI * 2);
+        lbCtx.fill();
     }
 
     for (let r = 0; r < lm.length; r++) {
@@ -1687,25 +2307,20 @@ function renderLevel() {
     lbCtx.globalCompositeOperation = "source-over";
     ctx.drawImage(lightBuffer, 0, 0);
 
-    // Additive glow pass on the main canvas so light sources look luminous
-    // without affecting the darkness mask compositing.
+    // Additive glow pass
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
 
-    if (ghost.active && ghost.mode === 1) {
-        const fade = ghost.fade || 0;
-        if (fade > 0.001) {
-            let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
-            let gGlow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 420);
-            gGlow.addColorStop(0, "rgba(255,240,180," + (0.42 * fade) + ")");
-            gGlow.addColorStop(0.45, "rgba(255,225,155," + (0.22 * fade) + ")");
-            gGlow.addColorStop(0.75, "rgba(255,215,145," + (0.08 * fade) + ")");
-            gGlow.addColorStop(1, "transparent");
-            ctx.fillStyle = gGlow;
-            ctx.beginPath();
-            ctx.arc(gx, gy, 420, 0, Math.PI * 2);
-            ctx.fill();
-        }
+    if (ghostLightActive && ghostLightFade > 0.001) {
+        let gGlow = ctx.createRadialGradient(ghostLightX, ghostLightY, 0, ghostLightX, ghostLightY, 420);
+        gGlow.addColorStop(0, "rgba(255,240,180," + (0.42 * ghostLightFade) + ")");
+        gGlow.addColorStop(0.45, "rgba(255,225,155," + (0.22 * ghostLightFade) + ")");
+        gGlow.addColorStop(0.75, "rgba(255,215,145," + (0.08 * ghostLightFade) + ")");
+        gGlow.addColorStop(1, "transparent");
+        ctx.fillStyle = gGlow;
+        ctx.beginPath();
+        ctx.arc(ghostLightX, ghostLightY, 420, 0, Math.PI * 2);
+        ctx.fill();
     }
 
     for (let r = 0; r < lm.length; r++) {
@@ -1743,6 +2358,12 @@ function renderLevel() {
     }
 
     ctx.restore();
+
+    // === HUD ===
+    if (isMp) {
+        renderMultiplayerHud();
+    }
+
     if (headCallout.ttl > 0) {
         const alpha = Math.max(0, Math.min(1, headCallout.ttl / Math.max(1, headCallout.maxTtl)));
         const sx = p.x - camera.x + p.w * 0.5;
@@ -1755,6 +2376,52 @@ function renderLevel() {
         ctx.fillText(headCallout.text, sx, sy);
         ctx.restore();
         headCallout.ttl--;
+    }
+}
+
+function renderMultiplayerHud() {
+    const isMainMp = mp && mp.active && mp.role === "main";
+    const isCloneMp = mp && mp.active && mp.role === "clone";
+
+    ctx.save();
+    ctx.textAlign = "left";
+
+    // Role indicator
+    ctx.font = "bold 16px Courier New";
+    ctx.fillStyle = isMainMp ? "#fff" : "#f0f";
+    ctx.fillText(isMainMp ? "MAIN" : "CLONE", 25, 90);
+
+    // Connected indicator
+    ctx.font = "12px Courier New";
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.fillText("CONNECTED", 25, 108);
+
+    // Room code
+    if (mp.roomCode) {
+        ctx.fillText("ROOM: " + mp.roomCode, 25, 124);
+    }
+
+    // Mode display
+    const displayMode = isMainMp ? mp.partnerMode : ghost.mode;
+    ctx.font = "bold 14px Courier New";
+    ctx.fillStyle = MODES[displayMode].color;
+    ctx.fillText(MODES[displayMode].name, 25, 144);
+
+    ctx.restore();
+
+    // Update HTML HUD for multiplayer
+    document.getElementById("buff").innerText = "LIVE";
+    const mNameEl = document.getElementById("m-name");
+    mNameEl.innerText = MODES[displayMode].name;
+    mNameEl.style.color = MODES[displayMode].color;
+
+    // Touch control visibility per role
+    if (isMainMp) {
+        modeBtn.style.display = "none";
+        teleportBtn.style.display = mp.partnerMode === 2 ? "block" : "none";
+    } else if (isCloneMp) {
+        modeBtn.style.display = "block";
+        teleportBtn.style.display = "none";
     }
 }
 
