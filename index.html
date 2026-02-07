@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ECHO RIFT | THE GREAT ESCAPE</title>
+    <style>
+        body { margin: 0; background: #010103; overflow: hidden; font-family: 'Courier New', monospace; }
+        canvas { display: block; image-rendering: pixelated; }
+        .ui { position: absolute; top: 25px; left: 25px; pointer-events: none; z-index: 10; color: #fff; }
+        .dialog-box {
+            position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%);
+            width: 550px; background: rgba(10, 10, 15, 0.95); border-left: 5px solid #f0f;
+            padding: 20px; color: #fff; display: none; z-index: 200; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .dialog-name { color: #f0f; font-weight: bold; font-size: 12px; letter-spacing: 2px; margin-bottom: 8px; }
+        #m-name { font-weight: bold; font-size: 2.2em; letter-spacing: 5px; text-shadow: 0 0 15px currentColor; }
+    </style>
+</head>
+<body>
+    <div class="ui" id="game-ui" style="display:none">
+        <div id="m-name" style="color:#f0f">BOUNCE</div>
+        <div style="opacity: 0.5; font-size: 12px;">INMATE 734-C // TETHER: <span id="buff">0%</span></div>
+        <div style="opacity: 0.35; font-size: 10px; margin-top: 6px;">[1/2/3] MODE &nbsp; [E] PLACE ANCHOR &nbsp; [Q] SWAP</div>
+    </div>
+    
+    <div class="dialog-box" id="dialog-box">
+        <div class="dialog-name" id="speaker">SYSTEM</div>
+        <div id="text-content">...</div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById("canvas"), ctx = canvas.getContext("2d");
+const lightBuffer = document.createElement('canvas');
+const lbCtx = lightBuffer.getContext('2d');
+
+let W, H;
+let gameState = "CUTSCENE_SENTENCE", timer = 0;
+const TILE = 60;
+// Reduced DELAY because at 30fps, 120 frames is 4 seconds. 
+// 60 frames = 2 seconds (original behavior).
+const DELAY = 60; 
+
+const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history: [] };
+const ghost = { x: -100, y: -100, active: false, mode: 0, anchored: false };
+const camera = { x: 0, y: 0 };
+const lampPhases = {};
+function getLampPhase(c, r) {
+    let key = c + "," + r;
+    if (!(key in lampPhases)) lampPhases[key] = Math.random() * Math.PI * 2;
+    return lampPhases[key];
+}
+let keys = {};
+
+// Frame Rate Control
+let lastTime = 0;
+const fps = 30;
+const interval = 1000 / fps;
+
+const MODES = [
+    { name: "BOUNCE", color: "#f0f", bounce: 1.8 },
+    { name: "SUPER-LIGHT", color: "#ff0", bounce: 0 },
+    { name: "ANCHOR", color: "#0ff", bounce: 0 }
+];
+
+const TILES = {
+    0: { name: "Empty", hitbox: null, solid: false, light: false, draw() {} },
+    1: { name: "Wall", hitbox: {ox:0,oy:0,w:60,h:60}, solid: true, light: false, draw(ctx,x,y) {
+        ctx.fillStyle = "#0e0e12"; ctx.fillRect(x, y, TILE, TILE);
+        ctx.strokeStyle = "#1a1a25"; ctx.strokeRect(x+2, y+2, TILE-4, TILE-4);
+    }},
+    2: { name: "Platform", hitbox: {ox:0,oy:40,w:60,h:20}, solid: true, light: false, draw(ctx,x,y) {
+        ctx.fillStyle = "#15151b"; ctx.fillRect(x, y+40, TILE, 20);
+        ctx.fillStyle = "#222"; ctx.fillRect(x+5, y+50, 5, 10); ctx.fillRect(x+50, y+50, 5, 10);
+    }},
+    3: { name: "Crate", hitbox: {ox:10,oy:10,w:40,h:50}, solid: true, light: false, draw(ctx,x,y) {
+        ctx.fillStyle = "#3d2b1f"; ctx.fillRect(x+10, y+10, 40, 50);
+        ctx.strokeStyle = "#2d1b0f"; ctx.strokeRect(x+15, y+15, 30, 40);
+        ctx.fillStyle = "#4d3b2f"; ctx.fillRect(x+10, y+10, 40, 5);
+    }},
+    4: { name: "Dialogue", hitbox: null, solid: false, light: false, draw() {} },
+    5: { name: "Lamp", hitbox: null, solid: false, light: true, draw(ctx,x,y) {
+        ctx.fillStyle = "#444"; ctx.fillRect(x+22, y, 16, 8);
+        ctx.fillStyle = "#665522"; ctx.fillRect(x+18, y+8, 24, 6);
+        ctx.fillStyle = "rgba(255,180,80,0.3)"; ctx.fillRect(x+20, y+14, 20, 4);
+    }},
+    6: { name: "Vent", hitbox: null, solid: false, light: false, draw(ctx,x,y) {
+        ctx.fillStyle = "#1a1a20"; ctx.fillRect(x+4, y+4, 52, 52);
+        ctx.strokeStyle = "#333"; ctx.strokeRect(x+4, y+4, 52, 52);
+        for (let i = 0; i < 4; i++) {
+            ctx.fillStyle = "#2a2a30"; ctx.fillRect(x+8, y+10+i*12, 44, 6);
+        }
+    }}
+};
+
+let currentLevel = 0;
+const firedTriggers = new Set();
+
+const levels = [
+    {
+        name: "CELL",
+        spawn: { x: 2, y: 6 },
+        triggers: {
+            "2,6": { text: "My cell door is locked, but that vent grate is loose. Just gotta squeeze through.", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,5,0,6,1],
+            [1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,3,0,1],
+            [1,0,2,2,0,0,0,0,1],
+            [1,0,4,0,0,0,2,2,1],
+            [1,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "STORAGE",
+        spawn: { x: 1, y: 7 },
+        triggers: {
+            "2,7": { text: "Storage room. Finally some space... wait, why is HE still here?", speaker: "734-C", once: true },
+            "18,6": { text: "Man, this imposter with an ugly mug is ruining my groove!", speaker: "734-C", once: true },
+            "28,2": { text: "I can see the vent up there. Need to use these crates and platforms to climb...", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,5,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,1],
+            [1,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,1],
+            [1,0,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,2,2,2,0,0,3,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,4,0,0,0,0,3,0,0,2,2,0,0,1],
+            [1,0,4,2,2,2,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "SHAFT",
+        spawn: { x: 1, y: 13 },
+        triggers: {
+            "1,13": { text: "A vertical shaft. I'll need to place my anchor and swap to climb this...", speaker: "734-C", once: true },
+            "3,2": { text: "Almost there... just need to reach that vent.", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,6,0,0,0,1],
+            [1,0,0,4,2,2,0,0,0,1],
+            [1,0,0,0,0,0,0,5,0,1],
+            [1,0,2,2,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,2,2,0,1],
+            [1,5,0,0,0,0,0,0,0,1],
+            [1,0,0,0,2,2,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,1],
+            [1,0,2,0,0,0,0,5,0,1],
+            [1,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,3,0,0,0,1],
+            [1,0,0,2,2,2,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "CORRIDOR",
+        spawn: { x: 1, y: 7 },
+        triggers: {
+            "1,7": { text: "Long corridor. Guards patrol here... I need to use BOUNCE to launch over gaps and SUPER-LIGHT to see ahead.", speaker: "734-C", once: true },
+            "20,3": { text: "Dead end above? Place an anchor below, jump, then swap back if I fall.", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,2,0,0,0,0,2,2,0,0,0,0,0,0,0,0,0,0,2,2,1],
+            [1,0,0,0,2,2,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,2,0,0,0,1],
+            [1,0,0,0,0,0,0,0,3,0,1,0,0,3,0,0,0,3,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,1],
+            [1,0,0,2,2,2,0,0,0,0,1,2,2,2,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "REACTOR",
+        spawn: { x: 1, y: 11 },
+        triggers: {
+            "1,11": { text: "The reactor room. Massive vertical space. I need all three modes to get through this one.", speaker: "734-C", once: true },
+            "8,1": { text: "Place anchor on a platform, jump into the void, then swap back if I miss. Or use BOUNCE off the ghost to launch upward...", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,6,1],
+            [1,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,2,2,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,1],
+            [1,0,0,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,1],
+            [1,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,5,0,1],
+            [1,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,2,2,0,0,0,0,0,0,2,2,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+    }
+];
+
+function getMap() { return levels[currentLevel].map; }
+
+function checkTriggers() {
+    let m = getMap();
+    let level = levels[currentLevel];
+    for (let r = 0; r < m.length; r++) {
+        for (let c = 0; c < m[r].length; c++) {
+            let id = m[r][c];
+            let px = Math.floor(p.x / TILE), py = Math.floor((p.y + p.h - 1) / TILE);
+            if (px !== c || py !== r) continue;
+            if (id === 4) {
+                let key = currentLevel + ":" + c + "," + r;
+                let trig = level.triggers[c + "," + r];
+                if (trig && !firedTriggers.has(key)) {
+                    showDialog(trig.text, trig.speaker);
+                    if (trig.once) firedTriggers.add(key);
+                }
+            } else if (id === 6) {
+                transitionLevel(currentLevel + 1);
+            }
+        }
+    }
+}
+
+function transitionLevel(nextIndex) {
+    if (nextIndex >= levels.length) return;
+    currentLevel = nextIndex;
+    let spawn = levels[currentLevel].spawn;
+    p.x = spawn.x * TILE; p.y = spawn.y * TILE;
+    p.vx = 0; p.vy = 0; p.grounded = false;
+    p.history = []; ghost.active = false; ghost.anchored = false; ghost.x = -100; ghost.y = -100;
+    if (currentLevel > 0) document.getElementById("game-ui").style.display = "block";
+}
+
+function resize() {
+    W = canvas.width = lightBuffer.width = window.innerWidth;
+    H = canvas.height = lightBuffer.height = window.innerHeight;
+}
+window.onresize = resize; resize();
+
+window.onkeydown = e => {
+    keys[e.code] = true;
+    if(e.key === "1") setMode(0); if(e.key === "2") setMode(1); if(e.key === "3") setMode(2);
+    if(e.key === "e" && ghost.mode === 2 && gameState === "PLAYING") {
+        ghost.x = p.x; ghost.y = p.y; ghost.active = true; ghost.anchored = true;
+    }
+    if(e.key === "q" && ghost.mode === 2 && ghost.anchored && gameState === "PLAYING") {
+        let tx = ghost.x, ty = ghost.y;
+        ghost.x = p.x; ghost.y = p.y;
+        p.x = tx; p.y = ty; p.vx = 0; p.vy = 0;
+    }
+};
+window.onkeyup = e => keys[e.code] = false;
+
+function setMode(m) {
+    if (ghost.mode === 2 && m !== 2) { ghost.anchored = false; }
+    ghost.mode = m;
+    document.getElementById("m-name").innerText = MODES[m].name;
+    document.getElementById("m-name").style.color = MODES[m].color;
+}
+
+function showDialog(text, speaker = "734-C") {
+    const box = document.getElementById("dialog-box");
+    document.getElementById("speaker").innerText = speaker;
+    document.getElementById("text-content").innerText = text;
+    box.style.display = "block";
+    setTimeout(() => { box.style.display = "none"; }, 4500);
+}
+
+function drawDroid(x, y, isGhost) {
+    ctx.save();
+    let m = MODES[ghost.mode];
+    let time = Date.now() * 0.005;
+    if(isGhost) { ctx.globalAlpha = 0.5; ctx.shadowBlur = 15; ctx.shadowColor = m.color; }
+    ctx.fillStyle = isGhost ? m.color : "#1a1a1a";
+    ctx.fillRect(x+4, y+38 + (isGhost?0:Math.sin(time*4)*4), 8, 10); 
+    ctx.fillRect(x+22, y+38 - (isGhost?0:Math.sin(time*4)*4), 8, 10); 
+    ctx.fillStyle = isGhost ? m.color : "#333";
+    ctx.fillRect(x, y+14, 34, 28); 
+    ctx.fillStyle = "rgba(255,255,255,0.1)"; ctx.fillRect(x+2, y+16, 12, 24); 
+    ctx.fillStyle = isGhost ? "#000" : "#eee";
+    ctx.fillRect(x+3, y, 28, 18); 
+    ctx.fillStyle = isGhost ? m.color : (p.grounded ? "#0f0" : "#f00");
+    ctx.fillRect(x + (p.vx > 0.1 ? 20 : (p.vx < -0.1 ? 6 : 13)), y+5, 8, 4); 
+    ctx.restore();
+}
+
+function drawEnvironment(cell, c, r) {
+    if (cell === 0) return;
+    TILES[cell].draw(ctx, c * TILE, r * TILE);
+}
+
+function update(currentTime) {
+    const deltaTime = currentTime - lastTime;
+
+    if (deltaTime > interval) {
+        lastTime = currentTime - (deltaTime % interval);
+        
+        timer++;
+        if (gameState === "CUTSCENE_SENTENCE") {
+            ctx.fillStyle = "black"; ctx.fillRect(0,0,W,H);
+            ctx.fillStyle = "#f00"; ctx.font = "16px Courier New";
+            if (timer > 30) ctx.fillText("> INMATE 734-C: PROCESSING...", 50, 100);
+            if (timer > 90) ctx.fillText("> PENALTY: TEMPORAL RECURSION TETHER", 50, 130);
+            if (timer > 150) ctx.fillText("> TETHER STATUS: LOCKED TO 120ms OFFSET", 50, 160);
+            if (timer > 250) {
+                gameState = "PLAYING";
+                transitionLevel(0);
+            }
+        } else if (gameState === "PLAYING") {
+            renderLevel();
+        }
+    }
+    requestAnimationFrame(update);
+}
+
+function renderLevel() {
+    if (keys["ArrowLeft"]) p.vx -= 1.8; 
+    if (keys["ArrowRight"]) p.vx += 1.8;
+    if (keys["ArrowUp"] && p.grounded) { p.vy = -20; p.grounded = false; }
+    p.vx *= 0.85; p.vy += 1.2;
+    
+    p.history.push({ x: p.x, y: p.y });
+    document.getElementById("buff").innerText = Math.min(100, Math.floor(p.history.length/DELAY*100)) + "%";
+    if (ghost.mode === 2 && ghost.anchored) {
+        if (p.history.length > DELAY) p.history.shift();
+    } else {
+        if (p.history.length > DELAY) {
+            let past = p.history.shift(); ghost.x = past.x; ghost.y = past.y; ghost.active = true;
+        }
+    }
+
+    p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
+    camera.x += (p.x - W/2 - camera.x) * 0.1; camera.y += (p.y - H/2 - camera.y) * 0.1;
+
+    checkTriggers();
+
+    ctx.fillStyle = "#030305"; ctx.fillRect(0,0,W,H);
+    ctx.save(); ctx.translate(-camera.x, -camera.y);
+    getMap().forEach((row, r) => row.forEach((cell, c) => drawEnvironment(cell, c, r)));
+    if (ghost.active) drawDroid(ghost.x, ghost.y, true);
+    drawDroid(p.x, p.y, false);
+    ctx.restore();
+
+    lbCtx.globalCompositeOperation = "source-over";
+    lbCtx.fillStyle = "rgba(0,0,0,0.85)"; lbCtx.fillRect(0,0,W,H);
+    lbCtx.globalCompositeOperation = "destination-out";
+    let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, 250);
+    pG.addColorStop(0, "white"); pG.addColorStop(1, "transparent");
+    lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, 250, 0, Math.PI*2); lbCtx.fill();
+
+    if (ghost.active && ghost.mode === 1) {
+        let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, 1200);
+        gG.addColorStop(0, "rgba(255,255,0,1)"); gG.addColorStop(0.5, "rgba(255,255,0,0.4)"); gG.addColorStop(1, "transparent");
+        lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, 1200, 0, Math.PI*2); lbCtx.fill();
+    }
+
+    let t = Date.now() * 0.001;
+    let lm = getMap();
+    for (let r = 0; r < lm.length; r++) {
+        for (let c = 0; c < lm[r].length; c++) {
+            if (lm[r][c] !== 5) continue;
+            let lx = c * TILE + 30 - camera.x, ly = r * TILE + 30 - camera.y;
+            if (lx < -300 || lx > W + 300 || ly < -300 || ly > H + 300) continue;
+            let phase = getLampPhase(c, r);
+            let radius = 220 + 60 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
+            let lampG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, radius);
+            lampG.addColorStop(0, "white"); lampG.addColorStop(0.6, "rgba(255,255,255,0.4)"); lampG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = lampG; lbCtx.beginPath(); lbCtx.arc(lx, ly, radius, 0, Math.PI * 2); lbCtx.fill();
+        }
+    }
+
+    lbCtx.globalCompositeOperation = "source-over";
+    for (let r = 0; r < lm.length; r++) {
+        for (let c = 0; c < lm[r].length; c++) {
+            if (lm[r][c] !== 5) continue;
+            let lx = c * TILE + 30 - camera.x, ly = r * TILE + 30 - camera.y;
+            if (lx < -300 || lx > W + 300 || ly < -300 || ly > H + 300) continue;
+            let phase = getLampPhase(c, r);
+            let radius = 220 + 60 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
+            let tintG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, radius);
+            tintG.addColorStop(0, "rgba(255,153,64,0.18)"); tintG.addColorStop(0.5, "rgba(255,153,64,0.06)"); tintG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = tintG; lbCtx.beginPath(); lbCtx.arc(lx, ly, radius, 0, Math.PI * 2); lbCtx.fill();
+        }
+    }
+
+    ctx.drawImage(lightBuffer, 0, 0);
+}
+
+function resolve(isX) {
+    let currentMap = getMap();
+    for (let r = 0; r < currentMap.length; r++) {
+        for (let c = 0; c < currentMap[r].length; c++) {
+            let id = currentMap[r][c];
+            let tile = TILES[id];
+            if (!tile || !tile.solid || !tile.hitbox) continue;
+            let hb = tile.hitbox;
+            let b = { x: c * TILE + hb.ox, y: r * TILE + hb.oy, w: hb.w, h: hb.h };
+            if (p.x < b.x+b.w && p.x+p.w > b.x && p.y < b.y+b.h && p.y+p.h > b.y) {
+                if (isX) { p.x = p.vx > 0 ? b.x - p.w : b.x + b.w; p.vx = 0; }
+                else { if (p.vy > 0) p.grounded = true; p.y = p.vy > 0 ? b.y - p.h : b.y + b.h; p.vy = 0; }
+            }
+        }
+    }
+    if (ghost.active && ghost.mode !== 1) {
+        let g = { x: ghost.x, y: ghost.y, w: p.w, h: p.h };
+        if (p.x < g.x+g.w && p.x+p.w > g.x && p.y < g.y+g.h && p.y+p.h > g.y) {
+            if (ghost.mode === 0) {
+                if (isX) { p.x = p.vx > 0 ? g.x - p.w : g.x + g.w; p.vx *= -1.8; }
+                else { p.y = p.vy > 0 ? g.y - p.h : g.y + g.h; p.vy *= -1.8; }
+            } else if (ghost.mode === 2) {
+                if (isX) { p.x = p.vx > 0 ? g.x - p.w : g.x + g.w; p.vx = 0; }
+                else { if (p.vy > 0) p.grounded = true; p.y = p.vy > 0 ? g.y - p.h : g.y + g.h; p.vy = 0; }
+            }
+        }
+    }
+}
+
+requestAnimationFrame(update);
+</script>
+</body>
+</html>
