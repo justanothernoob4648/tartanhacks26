@@ -151,7 +151,7 @@
     <div class="ui" id="game-ui" style="display:none">
         <div id="m-name" style="color:#f0f">BOUNCE</div>
         <div style="opacity: 0.5; font-size: 12px;">INMATE 734-C // TETHER: <span id="buff">0%</span></div>
-        <div style="opacity: 0.35; font-size: 10px; margin-top: 6px;">[1/2/3] MODE &nbsp; [S] TELEPORT BEHIND GHOST</div>
+        <div style="opacity: 0.35; font-size: 10px; margin-top: 6px;">[1/2/3] MODE (UNLOCK VIA MODULES) &nbsp; [S] TELEPORT BEHIND GHOST</div>
     </div>
     
     <div class="dialog-box" id="dialog-box">
@@ -195,6 +195,7 @@ const jumpBtn = document.getElementById("jump-btn");
 const modeBtn = document.getElementById("mode-btn");
 const teleportBtn = document.getElementById("teleport-btn");
 const virtualInput = { left: false, right: false, jump: false };
+const headCallout = { text: "", ttl: 0, maxTtl: 0, color: "#ffffff" };
 const joystick = {
     active: false,
     pointerId: null,
@@ -209,6 +210,13 @@ let audioCtx = null, masterGain = null;
 let ambientGainNode = null;
 let ambientPlaying = false;
 let ambientLoopTimer = null;
+let dialogHideTimer = null;
+let cellNoisePending = false;
+let cellNoiseStarted = false;
+let cellNoiseDone = false;
+let cellNoiseMain = null;
+let cellNoiseGainNode = null;
+let cellNoiseBabbleTimer = null;
 const MASTER_GAIN_TARGET = 0.7;
 const AMBIENT_GAIN_TARGET = 0.55;
 const SFX_GAIN_MULT = 1.7;
@@ -295,6 +303,12 @@ const MODES = [
     { name: "SUPER-LIGHT", color: "#ff0", bounce: 0 },
     { name: "ANCHOR", color: "#0ff", bounce: 0 }
 ];
+const MODE_MODULE_TILES = {
+    8: 1, // unlock SUPER-LIGHT
+    9: 2  // unlock ANCHOR
+};
+const unlockedModes = new Set([0]);
+let lastLockedModePromptFrame = -999;
 
 const TILES = {
     0: { name: "Empty", hitbox: null, solid: false, light: false, draw() {} },
@@ -336,27 +350,57 @@ const TILES = {
             ctx.closePath();
             ctx.fill();
         }
+    }},
+    8: { name: "Super-Light Module", hitbox: null, solid: false, light: true, draw(ctx,x,y) {
+        const cx = x + TILE * 0.5, cy = y + TILE * 0.5;
+        ctx.fillStyle = "rgba(255, 240, 110, 0.18)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 24, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#ffe26a";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 16, y + 16, 28, 28);
+        ctx.fillStyle = "#ffe26a";
+        ctx.fillRect(x + 24, y + 22, 12, 16);
+        ctx.fillStyle = "#101014";
+        ctx.fillRect(x + 27, y + 25, 6, 10);
+    }},
+    9: { name: "Anchor Module", hitbox: null, solid: false, light: true, draw(ctx,x,y) {
+        const cx = x + TILE * 0.5, cy = y + TILE * 0.5;
+        ctx.fillStyle = "rgba(105, 255, 255, 0.16)";
+        ctx.beginPath();
+        ctx.arc(cx, cy, 24, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#66ffff";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 16, y + 16, 28, 28);
+        ctx.fillStyle = "#66ffff";
+        ctx.beginPath();
+        ctx.moveTo(x + 30, y + 20);
+        ctx.lineTo(x + 24, y + 34);
+        ctx.lineTo(x + 36, y + 34);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillRect(x + 28, y + 34, 4, 10);
     }}
 };
 
 let currentLevel = 0;
 const firedTriggers = new Set();
 const respawnQuips = [
-    "Drats!",
-    "Foiled again!",
-    "Not my finest landing.",
-    "Well... that went poorly.",
-    "Back to square one.",
-    "Nope. Try that again."
+    "Oof.",
+    "Nope.",
+    "Bad idea.",
+    "That looked cooler in my head.",
+    "Okay, run it back.",
+    "I definitely meant to do that."
 ];
 
 const levels = [
     {
         name: "CELL",
         spawn: { x: 2, y: 6 },
-        triggers: {
-            "2,6": { text: "My cell door is locked, but that vent grate is loose. Just gotta squeeze through.", speaker: "734-C", once: true }
-        },
+        triggers: {},
         map: [
             [1,1,1,1,1,1,1,1,1],
             [1,0,0,0,0,5,0,6,1],
@@ -364,96 +408,93 @@ const levels = [
             [1,0,0,0,0,0,0,0,1],
             [1,0,0,0,0,0,3,0,1],
             [1,0,2,2,0,0,0,0,1],
-            [1,0,4,0,0,0,2,2,1],
+            [1,0,0,0,0,0,2,2,1],
             [1,1,1,1,1,1,1,1,1]
         ]
     },
     {
-        name: "STORAGE",
+        name: "MAINTENANCE RUN",
+        spawn: { x: 1, y: 8 },
+        triggers: {
+            "2,8": { text: "More hallways, more bad architecture. Still bounce-only, still vibing.", speaker: "734-C", once: true },
+            "15,5": { text: "If I mess this jump, I'm blaming the contractor who built this place.", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,0,0,0,0,0,0,0,2,2,0,0,0,0,1],
+            [1,0,0,0,2,2,0,0,0,0,0,0,0,0,3,0,0,1],
+            [1,0,0,0,0,0,0,3,0,0,2,2,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,1],
+            [1,0,2,2,0,0,0,0,2,2,0,0,0,3,0,0,0,1],
+            [1,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,4,2,2,0,0,0,0,0,2,2,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,7,7,7,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "COOLANT LIFT",
+        spawn: { x: 2, y: 11 },
+        triggers: {
+            "2,11": { text: "This place is tall enough to have weather. Keep bouncing and don't panic.", speaker: "734-C", once: true },
+            "9,11": { text: "This is a two man job... but there's nobody else but me...", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,5,0,0,5,0,1,0,5,6,1],
+            [1,0,0,0,0,0,0,1,0,0,0,1],
+            [1,0,0,0,0,0,0,1,0,0,0,1],
+            [1,0,0,2,2,0,0,1,0,0,0,1],
+            [1,3,0,0,1,0,0,1,0,0,0,1],
+            [1,0,0,3,1,0,0,0,0,0,0,1],
+            [1,3,0,0,1,2,2,2,2,2,2,1],
+            [1,0,0,3,0,0,0,0,0,0,0,1],
+            [1,3,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,3,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "BLACKOUT LAB",
         spawn: { x: 1, y: 7 },
+        playerLightRadius: 85,
+        darknessAlpha: 0.9,
+        moduleBeacon: true,
         triggers: {
-            "2,7": { text: "Storage room. Finally some space... wait, why is HE still here?", speaker: "734-C", once: true },
-            "18,6": { text: "Man, this imposter with an ugly mug is ruining my groove!", speaker: "734-C", once: true },
-            "28,2": { text: "I can see the vent up there. Need to use these crates and platforms to climb...", speaker: "734-C", once: true }
-        },
-        map: [
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,5,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,1],
-            [1,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,2,2,2,1],
-            [1,0,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,2,2,2,0,0,3,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,3,0,0,0,0,3,0,0,0,0,0,0,0,0,0,4,0,0,0,0,3,0,0,2,2,0,0,1],
-            [1,0,4,2,2,2,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,1],
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
-        ]
-    },
-    {
-        name: "SHAFT",
-        spawn: { x: 1, y: 13 },
-        triggers: {
-            "1,13": { text: "A vertical shaft. I'll need to place my anchor and swap to climb this...", speaker: "734-C", once: true },
-            "3,2": { text: "Almost there... just need to reach that vent.", speaker: "734-C", once: true }
-        },
-        map: [
-            [1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,6,0,0,0,1],
-            [1,0,0,4,2,2,0,0,0,1],
-            [1,0,0,0,0,0,0,5,0,1],
-            [1,0,2,2,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,2,2,0,1],
-            [1,5,0,0,0,0,0,0,0,1],
-            [1,0,0,0,2,2,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,1],
-            [1,0,2,0,0,0,0,5,0,1],
-            [1,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,3,0,0,0,1],
-            [1,0,0,2,2,2,0,0,0,1],
-            [1,1,1,1,1,1,1,1,1,1]
-        ]
-    },
-    {
-        name: "CORRIDOR",
-        spawn: { x: 1, y: 7 },
-        triggers: {
-            "1,7": { text: "Long corridor. Guards patrol here... I need to use BOUNCE to launch over gaps and SUPER-LIGHT to see ahead.", speaker: "734-C", once: true },
-            "20,3": { text: "Dead end above? Place an anchor below, jump, then swap back if I fall.", speaker: "734-C", once: true }
-        },
-        map: [
-            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
-            [1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,2,0,0,0,0,2,2,0,0,0,0,0,0,0,0,0,0,2,2,1],
-            [1,0,0,0,2,2,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,2,0,0,0,1],
-            [1,0,0,0,0,0,0,0,3,0,1,0,0,3,0,0,0,3,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,1],
-            [1,0,0,2,2,2,0,0,0,0,1,2,2,2,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,1],
-            [1,1,1,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,1],
-            [1,1,1,1,1,1,1,7,7,7,1,1,1,1,1,7,7,7,1,1,1,1,1,1,1,1,1,7,7,7,1,1,1,1,1]
-        ]
-    },
-    {
-        name: "REACTOR",
-        spawn: { x: 1, y: 11 },
-        triggers: {
-            "1,11": { text: "The reactor room. Massive vertical space. I need all three modes to get through this one.", speaker: "734-C", once: true },
-            "8,1": { text: "Place anchor on a platform, jump into the void, then swap back if I miss. Or use BOUNCE off the ghost to launch upward...", speaker: "734-C", once: true }
+            "2,7": { text: "Why is this room pitch black? And what is that glowing thing?.", speaker: "734-C", once: true },
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,6,1],
-            [1,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,2,2,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,1],
-            [1,0,0,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,1],
-            [1,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,5,0,1],
-            [1,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,0,0,0,2,2,0,0,0,0,0,0,2,2,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,3,0,0,0,0,0,0,0,3,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,8,4,0,0,0,0,0,0,0,1],
+            [1,0,0,2,2,0,0,0,0,0,0,0,0,0,2,2,0,0,0,1],
+            [1,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ]
+    },
+    {
+        name: "ANCHOR CHASM",
+        spawn: { x: 1, y: 9 },
+        triggers: {
+            "2,9": { text: "Big gaps ahead. If there's an ANCHOR module in here, I'm taking it.", speaker: "734-C", once: true },
+            "9,6": { text: "Anchor mode unlocked. Now I can bail myself out instead of face-planting every miss.", speaker: "734-C", once: true }
+        },
+        map: [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,0,0,0,0,0,0,2,2,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,2,2,0,0,0,0,0,0,0,3,0,0,0,2,2,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,0,2,2,0,0,0,0,0,0,0,2,2,0,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,9,4,0,0,0,0,0,0,3,0,0,0,0,1],
+            [1,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,2,2,0,0,0,0,0,0,2,2,0,0,0,0,0,2,2,0,0,1],
+            [1,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1,7,7,7,1,1,1,7,7,7,1,1,1,1,1,1]
         ]
     }
 ];
@@ -492,13 +533,15 @@ function transitionLevel(nextIndex) {
     p.vx = 0; p.vy = 0; p.grounded = false;
     p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0; ghost.fade = 0;
     particles.length = 0;
-    if (currentLevel > 0) document.getElementById("game-ui").style.display = "block";
+    document.getElementById("game-ui").style.display = "block";
+    if (currentLevel === 0) maybeStartCellNoiseSequence();
 }
 
 function respawnAtLevelStart() {
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
+    p.coyoteFrames = 0;
     p.history = [];
     ghost.active = false;
     ghost.x = -100; ghost.y = -100;
@@ -510,7 +553,7 @@ function respawnAtLevelStart() {
     playSound("respawn");
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
     let quip = respawnQuips[Math.floor(Math.random() * respawnQuips.length)];
-    showDialog(quip, "734-C");
+    showHeadCallout(quip, "#ffffff", 70);
 }
 
 function resize() {
@@ -535,6 +578,87 @@ function ensureAudio() {
     masterGain = audioCtx.createGain();
     masterGain.gain.value = MASTER_GAIN_TARGET;
     masterGain.connect(audioCtx.destination);
+    if (cellNoisePending && currentLevel === 0) maybeStartCellNoiseSequence();
+}
+
+function makeNoiseBuffer(durationSec = 1.2) {
+    if (!audioCtx) return null;
+    const frameCount = Math.max(1, Math.floor(audioCtx.sampleRate * durationSec));
+    const buffer = audioCtx.createBuffer(1, frameCount, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < frameCount; i++) data[i] = (Math.random() * 2 - 1) * 0.8;
+    return buffer;
+}
+
+function maybeStartCellNoiseSequence() {
+    if (cellNoiseDone || cellNoiseStarted) return;
+    if (!audioCtx || !masterGain) {
+        cellNoisePending = true;
+        return;
+    }
+    cellNoisePending = false;
+    cellNoiseStarted = true;
+
+    const now = audioCtx.currentTime;
+    const src = audioCtx.createBufferSource();
+    const hp = audioCtx.createBiquadFilter();
+    const lp = audioCtx.createBiquadFilter();
+    const gain = audioCtx.createGain();
+
+    src.buffer = makeNoiseBuffer(1.6);
+    src.loop = true;
+    hp.type = "highpass";
+    hp.frequency.value = 260;
+    lp.type = "lowpass";
+    lp.frequency.value = 2200;
+
+    // Start loud immediately, then push into an even louder swell.
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.linearRampToValueAtTime(0.78, now + 8.2);
+
+    src.connect(hp);
+    hp.connect(lp);
+    lp.connect(gain);
+    gain.connect(masterGain);
+    src.start(now + 0.03);
+    showDialog("*Indistinct Chatter Outside Cell*", "SYSTEM", 8400);
+
+    cellNoiseMain = src;
+    cellNoiseGainNode = gain;
+    cellNoiseBabbleTimer = setInterval(() => {
+        if (!audioCtx || cellNoiseDone) return;
+        scheduleTone(rand(130, 320), rand(160, 480), 0, rand(0.08, 0.2), rand(0.018, 0.042), "triangle");
+        if (Math.random() < 0.58) {
+            scheduleTone(rand(260, 1100), rand(220, 760), 0.01, rand(0.05, 0.14), rand(0.012, 0.03), "sawtooth");
+        }
+    }, 150);
+
+    setTimeout(() => {
+        if (cellNoiseDone) return;
+        const cutTime = audioCtx ? audioCtx.currentTime : 0;
+        if (cellNoiseGainNode && audioCtx) {
+            cellNoiseGainNode.gain.cancelScheduledValues(cutTime);
+            cellNoiseGainNode.gain.setValueAtTime(Math.max(0.0001, cellNoiseGainNode.gain.value), cutTime);
+            cellNoiseGainNode.gain.exponentialRampToValueAtTime(0.0001, cutTime + 0.05);
+        }
+        if (cellNoiseMain && audioCtx) cellNoiseMain.stop(cutTime + 0.08);
+        if (cellNoiseBabbleTimer) {
+            clearInterval(cellNoiseBabbleTimer);
+            cellNoiseBabbleTimer = null;
+        }
+        cellNoiseDone = true;
+        const box = document.getElementById("dialog-box");
+        box.style.display = "none";
+        setTimeout(() => {
+            showDialog("What was that? Did the guards finally leave?", "734-C");
+        }, 1100);
+        setTimeout(() => {
+            showDialog("Time to put my plan into motion and follow the vents to freedom!", "734-C");
+        }, 7900);
+        setTimeout(() => {
+            startAmbientMusic();
+        }, 12400);
+    }, 8400);
 }
 
 function scheduleTone(freqStart, freqEnd, startOffset, duration, gainValue, type) {
@@ -616,6 +740,7 @@ function playSound(name) {
 }
 
 function startAmbientMusic() {
+    if (currentLevel === 0 && !cellNoiseDone) return;
     if (!audioCtx || !masterGain || ambientPlaying) return;
     ambientPlaying = true;
     if (ambientLoopTimer) { clearTimeout(ambientLoopTimer); ambientLoopTimer = null; }
@@ -872,7 +997,7 @@ jumpBtn.addEventListener("lostpointercapture", releaseJumpPointer);
 jumpBtn.addEventListener("contextmenu", e => e.preventDefault());
 
 modeBtn.addEventListener("click", () => {
-    setMode((ghost.mode + 1) % MODES.length);
+    cycleToNextUnlockedMode();
 });
 teleportBtn.addEventListener("click", () => {
     teleportToGhost();
@@ -882,10 +1007,79 @@ window.onkeydown = e => {
     ensureAudio();
     startAmbientMusic();
     keys[e.code] = true;
-    if(e.key === "1") setMode(0); if(e.key === "2") setMode(1); if(e.key === "3") setMode(2);
+    if (e.key === "1") setMode(0);
+    if (e.key === "2") trySelectMode(1);
+    if (e.key === "3") trySelectMode(2);
     if(e.code === "KeyS") teleportToGhost();
 };
 window.onkeyup = e => keys[e.code] = false;
+
+function getFirstUnlockedMode() {
+    for (let i = 0; i < MODES.length; i++) if (unlockedModes.has(i)) return i;
+    return 0;
+}
+
+function updateModeUi() {
+    const m = ghost.mode;
+    const unlockedCount = unlockedModes.size;
+    document.getElementById("m-name").innerText = MODES[m].name;
+    document.getElementById("m-name").style.color = MODES[m].color;
+    modeBtn.innerHTML = "TOGGLE MODE<br>" + MODES[m].name + " (" + unlockedCount + "/" + MODES.length + ")";
+    modeBtn.style.borderColor = MODES[m].color;
+    modeBtn.style.boxShadow = "0 0 12px " + hexToRgba(MODES[m].color, 0.45);
+    teleportBtn.style.display = m === 2 ? "block" : "none";
+}
+
+function showHeadCallout(text, color = "#ffffff", ttl = 90) {
+    headCallout.text = text;
+    headCallout.color = color;
+    headCallout.ttl = ttl;
+    headCallout.maxTtl = ttl;
+}
+
+function trySelectMode(m) {
+    if (!unlockedModes.has(m)) {
+        if (timer - lastLockedModePromptFrame > 45) {
+            showHeadCallout(MODES[m].name + " locked");
+            lastLockedModePromptFrame = timer;
+        }
+        return;
+    }
+    setMode(m);
+}
+
+function cycleToNextUnlockedMode() {
+    if (unlockedModes.size <= 1) {
+        if (timer - lastLockedModePromptFrame > 45) {
+            showHeadCallout("Need more modules");
+            lastLockedModePromptFrame = timer;
+        }
+        return;
+    }
+    let next = ghost.mode;
+    for (let i = 0; i < MODES.length; i++) {
+        next = (next + 1) % MODES.length;
+        if (unlockedModes.has(next)) {
+            setMode(next);
+            return;
+        }
+    }
+}
+
+function unlockModeFromModule(modeIndex) {
+    if (unlockedModes.has(modeIndex)) return false;
+    unlockedModes.add(modeIndex);
+    if (!unlockedModes.has(ghost.mode)) ghost.mode = getFirstUnlockedMode();
+    setMode(modeIndex);
+    emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 22, MODES[modeIndex].color, 1.7, 5.6);
+    playSound("swap");
+    if (modeIndex === 1) {
+        showDialog("Woah, let there be light! Looks like a new module, past me is glowing!");
+    } else if (modeIndex === 2) {
+        showDialog("Anchor module is up. Safety net engaged.", "734-C");
+    }
+    return true;
+}
 
 function teleportToGhost() {
     if (!ghost.active || ghost.mode !== 2 || gameState !== "PLAYING") return;
@@ -901,25 +1095,32 @@ function teleportToGhost() {
 }
 
 function setMode(m) {
+    if (!unlockedModes.has(m)) {
+        m = getFirstUnlockedMode();
+    }
     ghost.mode = m;
     if (m !== 0) {
         ghost.springCompression = 0;
         ghost.springCooldown = 0;
     }
-    document.getElementById("m-name").innerText = MODES[m].name;
-    document.getElementById("m-name").style.color = MODES[m].color;
-    modeBtn.innerHTML = "TOGGLE MODE<br>" + MODES[m].name;
-    modeBtn.style.borderColor = MODES[m].color;
-    modeBtn.style.boxShadow = "0 0 12px " + hexToRgba(MODES[m].color, 0.45);
-    teleportBtn.style.display = m === 2 ? "block" : "none";
+    updateModeUi();
 }
 
-function showDialog(text, speaker = "734-C") {
+function showDialog(text, speaker = "734-C", durationMs = 4500) {
     const box = document.getElementById("dialog-box");
+    if (dialogHideTimer) {
+        clearTimeout(dialogHideTimer);
+        dialogHideTimer = null;
+    }
     document.getElementById("speaker").innerText = speaker;
     document.getElementById("text-content").innerText = text;
     box.style.display = "block";
-    setTimeout(() => { box.style.display = "none"; }, 4500);
+    if (typeof durationMs === "number" && durationMs > 0) {
+        dialogHideTimer = setTimeout(() => {
+            box.style.display = "none";
+            dialogHideTimer = null;
+        }, durationMs);
+    }
 }
 
 function getBounceSpringMetrics() {
@@ -1144,6 +1345,23 @@ function checkSpikeCollision() {
     return false;
 }
 
+function collectUpgradeModules() {
+    let m = getMap();
+    for (let r = 0; r < m.length; r++) {
+        for (let c = 0; c < m[r].length; c++) {
+            const tileId = m[r][c];
+            const unlockModeIndex = MODE_MODULE_TILES[tileId];
+            if (typeof unlockModeIndex !== "number") continue;
+            const tx = c * TILE, ty = r * TILE;
+            const overlaps = p.x < tx + TILE && p.x + p.w > tx && p.y < ty + TILE && p.y + p.h > ty;
+            if (!overlaps) continue;
+            m[r][c] = 0;
+            unlockModeFromModule(unlockModeIndex);
+            return;
+        }
+    }
+}
+
 function drawArrowHead(x, y, angle, size, color, alpha) {
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -1258,6 +1476,10 @@ function update(currentTime) {
 }
 
 function renderLevel() {
+    const levelCfg = levels[currentLevel];
+    if (p.grounded) p.coyoteFrames = COYOTE_FRAMES;
+    else p.coyoteFrames = Math.max(0, p.coyoteFrames - 1);
+
     if (ghost.springCooldown > 0) ghost.springCooldown--;
     if (ghost.springCompression > 0.001) {
         ghost.springCompression += (0 - ghost.springCompression) * 0.18;
@@ -1326,6 +1548,7 @@ function renderLevel() {
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
     handleBounceSpringInteraction();
     teleportBtn.classList.toggle("enabled", ghost.active && ghost.mode === 2);
+    collectUpgradeModules();
     if (checkSpikeCollision()) return;
     let currentMap = getMap();
     let maxX = currentMap[0].length * TILE;
@@ -1349,11 +1572,33 @@ function renderLevel() {
 
     lbCtx.globalCompositeOperation = "source-over";
     lbCtx.clearRect(0, 0, W, H);
-    lbCtx.fillStyle = "rgba(0,0,0,0.22)"; lbCtx.fillRect(0,0,W,H);
+    lbCtx.fillStyle = "rgba(0,0,0," + (levelCfg.darknessAlpha ?? 0.22) + ")"; lbCtx.fillRect(0,0,W,H);
     lbCtx.globalCompositeOperation = "destination-out";
-    let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, 250);
+    const playerLightRadius = levelCfg.playerLightRadius || 250;
+    let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, playerLightRadius);
     pG.addColorStop(0, "white"); pG.addColorStop(1, "transparent");
-    lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, 250, 0, Math.PI*2); lbCtx.fill();
+    lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, playerLightRadius, 0, Math.PI*2); lbCtx.fill();
+
+    let lm = getMap();
+    if (levelCfg.moduleBeacon) {
+        for (let r = 0; r < lm.length; r++) {
+            for (let c = 0; c < lm[r].length; c++) {
+                const moduleMode = MODE_MODULE_TILES[lm[r][c]];
+                if (typeof moduleMode !== "number") continue;
+                const mx = c * TILE + TILE * 0.5 - camera.x;
+                const my = r * TILE + TILE * 0.5 - camera.y;
+                const glowRadius = moduleMode === 1 ? 210 : 180;
+                let g = lbCtx.createRadialGradient(mx, my, 0, mx, my, glowRadius);
+                g.addColorStop(0, hexToRgba(MODES[moduleMode].color, 0.95));
+                g.addColorStop(0.45, hexToRgba(MODES[moduleMode].color, 0.45));
+                g.addColorStop(1, "transparent");
+                lbCtx.fillStyle = g;
+                lbCtx.beginPath();
+                lbCtx.arc(mx, my, glowRadius, 0, Math.PI * 2);
+                lbCtx.fill();
+            }
+        }
+    }
 
     if (ghost.active && ghost.mode === 1) {
         const fade = ghost.fade || 0;
@@ -1369,7 +1614,6 @@ function renderLevel() {
     }
 
     let t = Date.now() * 0.001;
-    let lm = getMap();
     for (let r = 0; r < lm.length; r++) {
         for (let c = 0; c < lm[r].length; c++) {
             if (lm[r][c] !== 5) continue;
@@ -1499,6 +1743,19 @@ function renderLevel() {
     }
 
     ctx.restore();
+    if (headCallout.ttl > 0) {
+        const alpha = Math.max(0, Math.min(1, headCallout.ttl / Math.max(1, headCallout.maxTtl)));
+        const sx = p.x - camera.x + p.w * 0.5;
+        const sy = p.y - camera.y - 16 - (headCallout.maxTtl - headCallout.ttl) * 0.12;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = headCallout.color;
+        ctx.textAlign = "center";
+        ctx.font = "bold 14px Courier New";
+        ctx.fillText(headCallout.text, sx, sy);
+        ctx.restore();
+        headCallout.ttl--;
+    }
 }
 
 function resolve(isX) {
