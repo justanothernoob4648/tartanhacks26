@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ECHO RIFT | THE GREAT ESCAPE</title>
+    <title>ECHO</title>
     <style>
         body { margin: 0; background: #010103; overflow: hidden; font-family: 'Courier New', monospace; }
         canvas { display: block; image-rendering: pixelated; }
@@ -109,6 +109,14 @@ const TILES = {
 
 let currentLevel = 0;
 const firedTriggers = new Set();
+const respawnQuips = [
+    "Drats!",
+    "Foiled again!",
+    "Not my finest landing.",
+    "Well... that went poorly.",
+    "Back to square one.",
+    "Nope. Try that again."
+];
 
 const levels = [
     {
@@ -235,9 +243,6 @@ function checkTriggers() {
                     showDialog(trig.text, trig.speaker);
                     if (trig.once) firedTriggers.add(key);
                 }
-            } else if (id === 7) {
-                respawnAtLevelStart();
-                return;
             } else if (id === 6) {
                 transitionLevel(currentLevel + 1);
             }
@@ -266,6 +271,8 @@ function respawnAtLevelStart() {
     ghost.dirX = 1; ghost.dirY = 0;
     particles.length = 0;
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
+    let quip = respawnQuips[Math.floor(Math.random() * respawnQuips.length)];
+    showDialog(quip, "734-C");
 }
 
 function resize() {
@@ -369,6 +376,121 @@ function drawDroid(x, y, isGhost) {
 function drawEnvironment(cell, c, r) {
     if (cell === 0) return;
     TILES[cell].draw(ctx, c * TILE, r * TILE);
+}
+
+function drawOutOfBoundsBlocks() {
+    let m = getMap();
+    if (!m.length) return;
+
+    let minC = Math.floor(camera.x / TILE) - 1;
+    let maxC = Math.floor((camera.x + W) / TILE) + 1;
+    let minR = Math.floor(camera.y / TILE) - 1;
+    let maxR = Math.floor((camera.y + H) / TILE) + 1;
+
+    for (let r = minR; r <= maxR; r++) {
+        let row = m[r];
+        for (let c = minC; c <= maxC; c++) {
+            let inside = !!row && c >= 0 && c < row.length;
+            if (!inside) TILES[1].draw(ctx, c * TILE, r * TILE);
+        }
+    }
+}
+
+function pointInTriangle(px, py, ax, ay, bx, by, cx, cy) {
+    let v0x = cx - ax, v0y = cy - ay;
+    let v1x = bx - ax, v1y = by - ay;
+    let v2x = px - ax, v2y = py - ay;
+    let dot00 = v0x * v0x + v0y * v0y;
+    let dot01 = v0x * v1x + v0y * v1y;
+    let dot02 = v0x * v2x + v0y * v2y;
+    let dot11 = v1x * v1x + v1y * v1y;
+    let dot12 = v1x * v2x + v1y * v2y;
+    let denom = dot00 * dot11 - dot01 * dot01;
+    if (denom === 0) return false;
+    let inv = 1 / denom;
+    let u = (dot11 * dot02 - dot01 * dot12) * inv;
+    let v = (dot00 * dot12 - dot01 * dot02) * inv;
+    return u >= 0 && v >= 0 && u + v <= 1;
+}
+
+function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    function orient(px, py, qx, qy, rx, ry) {
+        let val = (qy - py) * (rx - qx) - (qx - px) * (ry - qy);
+        if (Math.abs(val) < 0.000001) return 0;
+        return val > 0 ? 1 : 2;
+    }
+    function onSegment(px, py, qx, qy, rx, ry) {
+        return qx <= Math.max(px, rx) && qx >= Math.min(px, rx) &&
+               qy <= Math.max(py, ry) && qy >= Math.min(py, ry);
+    }
+
+    let o1 = orient(ax, ay, bx, by, cx, cy);
+    let o2 = orient(ax, ay, bx, by, dx, dy);
+    let o3 = orient(cx, cy, dx, dy, ax, ay);
+    let o4 = orient(cx, cy, dx, dy, bx, by);
+
+    if (o1 !== o2 && o3 !== o4) return true;
+    if (o1 === 0 && onSegment(ax, ay, cx, cy, bx, by)) return true;
+    if (o2 === 0 && onSegment(ax, ay, dx, dy, bx, by)) return true;
+    if (o3 === 0 && onSegment(cx, cy, ax, ay, dx, dy)) return true;
+    if (o4 === 0 && onSegment(cx, cy, bx, by, dx, dy)) return true;
+    return false;
+}
+
+function rectIntersectsTriangle(rx, ry, rw, rh, ax, ay, bx, by, cx, cy) {
+    let rectPoints = [
+        [rx, ry],
+        [rx + rw, ry],
+        [rx + rw, ry + rh],
+        [rx, ry + rh]
+    ];
+    for (let i = 0; i < rectPoints.length; i++) {
+        let pt = rectPoints[i];
+        if (pointInTriangle(pt[0], pt[1], ax, ay, bx, by, cx, cy)) return true;
+    }
+    if (ax >= rx && ax <= rx + rw && ay >= ry && ay <= ry + rh) return true;
+    if (bx >= rx && bx <= rx + rw && by >= ry && by <= ry + rh) return true;
+    if (cx >= rx && cx <= rx + rw && cy >= ry && cy <= ry + rh) return true;
+
+    let triEdges = [[ax, ay, bx, by], [bx, by, cx, cy], [cx, cy, ax, ay]];
+    let rectEdges = [
+        [rx, ry, rx + rw, ry],
+        [rx + rw, ry, rx + rw, ry + rh],
+        [rx + rw, ry + rh, rx, ry + rh],
+        [rx, ry + rh, rx, ry]
+    ];
+    for (let i = 0; i < triEdges.length; i++) {
+        for (let j = 0; j < rectEdges.length; j++) {
+            let te = triEdges[i], re = rectEdges[j];
+            if (segmentsIntersect(te[0], te[1], te[2], te[3], re[0], re[1], re[2], re[3])) return true;
+        }
+    }
+    return false;
+}
+
+function intersectsSpikeTile(rx, ry, rw, rh, tileX, tileY) {
+    for (let i = 0; i < 6; i++) {
+        let sx = tileX + i * 10;
+        let ax = sx, ay = tileY + 60;
+        let bx = sx + 5, by = tileY + 42;
+        let cx = sx + 10, cy = tileY + 60;
+        if (rectIntersectsTriangle(rx, ry, rw, rh, ax, ay, bx, by, cx, cy)) return true;
+    }
+    return false;
+}
+
+function checkSpikeCollision() {
+    let m = getMap();
+    for (let r = 0; r < m.length; r++) {
+        for (let c = 0; c < m[r].length; c++) {
+            if (m[r][c] !== 7) continue;
+            if (intersectsSpikeTile(p.x, p.y, p.w, p.h, c * TILE, r * TILE)) {
+                respawnAtLevelStart();
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 function drawArrowHead(x, y, angle, size, color, alpha) {
@@ -532,6 +654,7 @@ function renderLevel() {
     }
 
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
+    if (checkSpikeCollision()) return;
     let currentMap = getMap();
     let maxX = currentMap[0].length * TILE;
     let maxY = currentMap.length * TILE;
@@ -544,6 +667,7 @@ function renderLevel() {
 
     ctx.fillStyle = "#030305"; ctx.fillRect(0,0,W,H);
     ctx.save(); ctx.translate(-camera.x, -camera.y);
+    drawOutOfBoundsBlocks();
     getMap().forEach((row, r) => row.forEach((cell, c) => drawEnvironment(cell, c, r)));
     drawGhostTrajectoryWorld();
     if (ghost.active) drawDroid(ghost.x, ghost.y, true);
@@ -552,6 +676,7 @@ function renderLevel() {
     updateAndDrawParticles();
 
     lbCtx.globalCompositeOperation = "source-over";
+    lbCtx.clearRect(0, 0, W, H);
     lbCtx.fillStyle = "rgba(0,0,0,0.22)"; lbCtx.fillRect(0,0,W,H);
     lbCtx.globalCompositeOperation = "destination-out";
     let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, 250);
@@ -561,8 +686,9 @@ function renderLevel() {
     if (ghost.active && ghost.mode === 1) {
         let gRadius = 260;
         let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius);
-        gG.addColorStop(0, "rgba(255,250,215,1)");
-        gG.addColorStop(0.6, "rgba(255,240,190,0.42)");
+        gG.addColorStop(0, "rgba(255,255,255,0.95)");
+        gG.addColorStop(0.35, "rgba(255,255,255,0.42)");
+        gG.addColorStop(0.78, "rgba(255,255,255,0.1)");
         gG.addColorStop(1, "transparent");
         lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius, 0, Math.PI*2); lbCtx.fill();
     }
@@ -589,22 +715,24 @@ function renderLevel() {
             lbCtx.closePath();
             lbCtx.fill();
 
-            let bulbG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, 55);
-            bulbG.addColorStop(0, "rgba(255,245,215,0.95)");
+            let bulbG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, 95);
+            bulbG.addColorStop(0, "rgba(255,255,255,0.95)");
+            bulbG.addColorStop(0.4, "rgba(255,255,255,0.5)");
+            bulbG.addColorStop(0.75, "rgba(255,255,255,0.14)");
             bulbG.addColorStop(1, "transparent");
             lbCtx.fillStyle = bulbG;
             lbCtx.beginPath();
-            lbCtx.arc(lx, ly, 55, 0, Math.PI * 2);
+            lbCtx.arc(lx, ly, 95, 0, Math.PI * 2);
             lbCtx.fill();
         }
     }
 
-    lbCtx.globalCompositeOperation = "source-over";
+    lbCtx.globalCompositeOperation = "destination-out";
     if (ghost.active && ghost.mode === 1) {
         let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
         let superTint = lbCtx.createRadialGradient(gx, gy - 80, 0, gx, gy, 420);
-        superTint.addColorStop(0, "rgba(255,230,175,0.26)");
-        superTint.addColorStop(0.5, "rgba(255,210,155,0.1)");
+        superTint.addColorStop(0, "rgba(255,255,255,0.24)");
+        superTint.addColorStop(0.5, "rgba(255,255,255,0.1)");
         superTint.addColorStop(1, "transparent");
         lbCtx.fillStyle = superTint;
         lbCtx.beginPath();
@@ -621,8 +749,8 @@ function renderLevel() {
             let coneHeight = 350 + 50 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
             let coneHalfWidth = 100 + 18 * Math.sin(t * 2.5 + phase * 1.1);
             let tintG = lbCtx.createLinearGradient(lx, ly - 10, lx, ly + coneHeight);
-            tintG.addColorStop(0, "rgba(255,220,175,0.26)");
-            tintG.addColorStop(0.5, "rgba(255,200,150,0.11)");
+            tintG.addColorStop(0, "rgba(255,255,255,0.22)");
+            tintG.addColorStop(0.5, "rgba(255,255,255,0.09)");
             tintG.addColorStop(1, "transparent");
             lbCtx.fillStyle = tintG;
             lbCtx.beginPath();
@@ -634,7 +762,62 @@ function renderLevel() {
         }
     }
 
+    lbCtx.globalCompositeOperation = "source-over";
     ctx.drawImage(lightBuffer, 0, 0);
+
+    // Additive glow pass on the main canvas so light sources look luminous
+    // without affecting the darkness mask compositing.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    if (ghost.active && ghost.mode === 1) {
+        let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
+        let gGlow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 420);
+        gGlow.addColorStop(0, "rgba(255,240,180,0.42)");
+        gGlow.addColorStop(0.45, "rgba(255,225,155,0.22)");
+        gGlow.addColorStop(0.75, "rgba(255,215,145,0.08)");
+        gGlow.addColorStop(1, "transparent");
+        ctx.fillStyle = gGlow;
+        ctx.beginPath();
+        ctx.arc(gx, gy, 420, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    for (let r = 0; r < lm.length; r++) {
+        for (let c = 0; c < lm[r].length; c++) {
+            if (lm[r][c] !== 5) continue;
+            let lx = c * TILE + 30 - camera.x, ly = r * TILE + 30 - camera.y;
+            if (lx < -250 || lx > W + 250 || ly < -250 || ly > H + 250) continue;
+
+            let phase = getLampPhase(c, r);
+            let coneHeight = 380 + 65 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
+            let coneHalfWidth = 120 + 24 * Math.sin(t * 2.5 + phase * 1.1);
+            let coneGlow = ctx.createLinearGradient(lx, ly - 10, lx, ly + coneHeight);
+            coneGlow.addColorStop(0, "rgba(255,225,160,0.28)");
+            coneGlow.addColorStop(0.32, "rgba(255,210,145,0.16)");
+            coneGlow.addColorStop(0.75, "rgba(255,200,135,0.07)");
+            coneGlow.addColorStop(1, "transparent");
+            ctx.fillStyle = coneGlow;
+            ctx.beginPath();
+            ctx.moveTo(lx, ly - 8);
+            ctx.lineTo(lx - coneHalfWidth, ly + coneHeight);
+            ctx.lineTo(lx + coneHalfWidth, ly + coneHeight);
+            ctx.closePath();
+            ctx.fill();
+
+            let bulbGlow = ctx.createRadialGradient(lx, ly, 0, lx, ly, 120);
+            bulbGlow.addColorStop(0, "rgba(255,235,175,0.45)");
+            bulbGlow.addColorStop(0.38, "rgba(255,220,150,0.24)");
+            bulbGlow.addColorStop(0.7, "rgba(255,210,140,0.1)");
+            bulbGlow.addColorStop(1, "transparent");
+            ctx.fillStyle = bulbGlow;
+            ctx.beginPath();
+            ctx.arc(lx, ly, 120, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
 }
 
 function resolve(isX) {
