@@ -3,7 +3,7 @@
 <head>
     <title>ECHO</title>
     <style>
-        body { margin: 0; background: #010103; overflow: hidden; font-family: 'Courier New', monospace; }
+        body { margin: 0; background: #010103; overflow: hidden; font-family: 'Courier New', monospace; touch-action: none; }
         canvas { display: block; image-rendering: pixelated; }
         .ui { position: absolute; top: 25px; left: 25px; pointer-events: none; z-index: 10; color: #fff; }
         .dialog-box {
@@ -13,6 +13,138 @@
         }
         .dialog-name { color: #f0f; font-weight: bold; font-size: 12px; letter-spacing: 2px; margin-bottom: 8px; }
         #m-name { font-weight: bold; font-size: 2.2em; letter-spacing: 5px; text-shadow: 0 0 15px currentColor; }
+        :root {
+            --joy-size: 132px;
+            --jump-width: 146px;
+            --jump-height: 88px;
+            --mode-width: 146px;
+            --mode-height: 48px;
+            --control-edge: 24px;
+            --control-gap: 14px;
+        }
+        #touch-controls {
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 120;
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
+            display: none;
+        }
+        .joy-wrap {
+            position: absolute;
+            left: var(--control-edge);
+            bottom: var(--control-edge);
+            width: var(--joy-size);
+            height: var(--joy-size);
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.08), transparent 58%),
+                radial-gradient(circle at 70% 75%, rgba(255, 255, 255, 0.04), transparent 55%),
+                rgba(8, 8, 12, 0.46);
+            border: 2px solid rgba(255, 255, 255, 0.16);
+            box-shadow: 0 0 22px rgba(0, 0, 0, 0.42), inset 0 0 20px rgba(255, 255, 255, 0.07);
+            pointer-events: auto;
+            touch-action: none;
+        }
+        .joy-knob {
+            position: absolute;
+            width: calc(var(--joy-size) * 0.48);
+            height: calc(var(--joy-size) * 0.48);
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            border-radius: 50%;
+            background:
+                radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08) 55%, rgba(255, 255, 255, 0.04) 100%);
+            border: 2px solid rgba(255, 255, 255, 0.26);
+            box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.12), 0 0 12px rgba(0, 0, 0, 0.24);
+        }
+        .actions-wrap {
+            position: absolute;
+            right: var(--control-edge);
+            bottom: var(--control-edge);
+            display: flex;
+            flex-direction: column;
+            gap: var(--control-gap);
+            align-items: flex-end;
+            pointer-events: none;
+        }
+        .touch-btn {
+            pointer-events: auto;
+            touch-action: none;
+            border: 2px solid rgba(255, 255, 255, 0.28);
+            color: #fff;
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02) 40%, rgba(0, 0, 0, 0.16) 100%),
+                repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 2px, transparent 2px 5px),
+                rgba(10, 10, 16, 0.36);
+            text-shadow: 0 0 8px rgba(255, 255, 255, 0.28);
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            letter-spacing: 1px;
+            box-shadow: 0 0 14px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+        }
+        #teleport-btn {
+            order: 0;
+            width: var(--mode-width);
+            height: var(--mode-height);
+            border-radius: 12px;
+            font-size: 12px;
+            padding: 0 8px;
+            box-sizing: border-box;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: clip;
+            display: none;
+        }
+        #teleport-btn.enabled {
+            border-color: #66ffff;
+            box-shadow: 0 0 14px rgba(0, 255, 255, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+        }
+        #jump-btn {
+            order: 2;
+            width: var(--jump-width);
+            height: var(--jump-height);
+            border-radius: 18px;
+            font-size: 22px;
+        }
+        #jump-btn.pressed {
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.08) 40%, rgba(0, 0, 0, 0.18) 100%),
+                repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.03) 0 2px, transparent 2px 5px),
+                rgba(255, 255, 255, 0.16);
+            box-shadow: 0 0 16px rgba(255, 255, 255, 0.2), inset 0 0 14px rgba(255, 255, 255, 0.12);
+        }
+        #mode-btn {
+            order: 1;
+            width: var(--mode-width);
+            height: var(--mode-height);
+            border-radius: 12px;
+            font-size: 12px;
+            padding: 0 8px;
+            box-sizing: border-box;
+            letter-spacing: 0.2px;
+            line-height: 1.05;
+            white-space: normal;
+            overflow: hidden;
+            text-overflow: clip;
+        }
+        @media (max-width: 700px), (pointer: coarse) {
+            :root {
+                --joy-size: clamp(104px, 25vw, 190px);
+                --jump-width: clamp(124px, 33vw, 190px);
+                --jump-height: clamp(74px, 20vw, 110px);
+                --mode-width: clamp(124px, 33vw, 190px);
+                --mode-height: clamp(42px, 11vw, 64px);
+                --control-edge: 16px;
+                --control-gap: 10px;
+            }
+            .dialog-box { width: min(88vw, 550px); }
+            #jump-btn { font-size: clamp(18px, 5vw, 22px); }
+        }
     </style>
 </head>
 <body>
@@ -28,6 +160,16 @@
     </div>
 
     <canvas id="canvas"></canvas>
+    <div id="touch-controls">
+        <div class="joy-wrap" id="joy-wrap">
+            <div class="joy-knob" id="joy-knob"></div>
+        </div>
+        <div class="actions-wrap">
+            <button class="touch-btn" id="teleport-btn" type="button">TELEPORT</button>
+            <button class="touch-btn" id="jump-btn" type="button">JUMP</button>
+            <button class="touch-btn" id="mode-btn" type="button">MODE</button>
+        </div>
+    </div>
 
 <script>
 const canvas = document.getElementById("canvas"), ctx = canvas.getContext("2d");
@@ -45,6 +187,22 @@ const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history:
 const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0 };
 const camera = { x: 0, y: 0 };
 const particles = [];
+const touchControls = document.getElementById("touch-controls");
+const joyWrap = document.getElementById("joy-wrap");
+const joyKnob = document.getElementById("joy-knob");
+const jumpBtn = document.getElementById("jump-btn");
+const modeBtn = document.getElementById("mode-btn");
+const teleportBtn = document.getElementById("teleport-btn");
+const virtualInput = { left: false, right: false, jump: false };
+const joystick = {
+    active: false,
+    pointerId: null,
+    centerX: 0,
+    centerY: 0,
+    maxRadius: 46,
+    deadZone: 8
+};
+const jumpPointers = new Set();
 const lampPhases = {};
 function getLampPhase(c, r) {
     let key = c + "," + r;
@@ -326,25 +484,129 @@ function updateAndDrawParticles() {
     ctx.restore();
 }
 
+function setTouchControlsVisible(show) {
+    touchControls.style.display = show ? "block" : "none";
+}
+
+function setJoystickVisual(dx, dy) {
+    joyKnob.style.transform = "translate(-50%, -50%) translate(" + dx + "px, " + dy + "px)";
+}
+
+function applyJoystickMovement(dx) {
+    if (Math.abs(dx) <= joystick.deadZone) {
+        virtualInput.left = false;
+        virtualInput.right = false;
+        return;
+    }
+    virtualInput.left = dx < 0;
+    virtualInput.right = dx > 0;
+}
+
+function updateJoystickCenter() {
+    const rect = joyWrap.getBoundingClientRect();
+    joystick.centerX = rect.left + rect.width * 0.5;
+    joystick.centerY = rect.top + rect.height * 0.5;
+    joystick.maxRadius = rect.width * 0.38;
+}
+
+function updateJoystickFromPointer(clientX, clientY) {
+    let dx = clientX - joystick.centerX;
+    let dy = clientY - joystick.centerY;
+    const len = Math.hypot(dx, dy);
+    if (len > joystick.maxRadius && len > 0) {
+        const scale = joystick.maxRadius / len;
+        dx *= scale;
+        dy *= scale;
+    }
+    setJoystickVisual(dx, dy);
+    applyJoystickMovement(dx);
+}
+
+function resetJoystick() {
+    joystick.active = false;
+    joystick.pointerId = null;
+    virtualInput.left = false;
+    virtualInput.right = false;
+    setJoystickVisual(0, 0);
+}
+
+joyWrap.addEventListener("pointerdown", e => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    updateJoystickCenter();
+    joystick.active = true;
+    joystick.pointerId = e.pointerId;
+    joyWrap.setPointerCapture(e.pointerId);
+    updateJoystickFromPointer(e.clientX, e.clientY);
+});
+joyWrap.addEventListener("pointermove", e => {
+    if (!joystick.active || e.pointerId !== joystick.pointerId) return;
+    e.preventDefault();
+    updateJoystickFromPointer(e.clientX, e.clientY);
+});
+function releaseJoystickPointer(e) {
+    if (!joystick.active || e.pointerId !== joystick.pointerId) return;
+    e.preventDefault();
+    resetJoystick();
+}
+joyWrap.addEventListener("pointerup", releaseJoystickPointer);
+joyWrap.addEventListener("pointercancel", releaseJoystickPointer);
+joyWrap.addEventListener("lostpointercapture", () => resetJoystick());
+joyWrap.addEventListener("contextmenu", e => e.preventDefault());
+
+jumpBtn.addEventListener("pointerdown", e => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    jumpPointers.add(e.pointerId);
+    jumpBtn.classList.add("pressed");
+    virtualInput.jump = true;
+    jumpBtn.setPointerCapture(e.pointerId);
+});
+function releaseJumpPointer(e) {
+    jumpPointers.delete(e.pointerId);
+    if (jumpPointers.size === 0) {
+        jumpBtn.classList.remove("pressed");
+        virtualInput.jump = false;
+    }
+}
+jumpBtn.addEventListener("pointerup", releaseJumpPointer);
+jumpBtn.addEventListener("pointercancel", releaseJumpPointer);
+jumpBtn.addEventListener("lostpointercapture", releaseJumpPointer);
+jumpBtn.addEventListener("contextmenu", e => e.preventDefault());
+
+modeBtn.addEventListener("click", () => {
+    setMode((ghost.mode + 1) % MODES.length);
+});
+teleportBtn.addEventListener("click", () => {
+    teleportToGhost();
+});
+
 window.onkeydown = e => {
     keys[e.code] = true;
     if(e.key === "1") setMode(0); if(e.key === "2") setMode(1); if(e.key === "3") setMode(2);
-    if(e.code === "KeyS" && ghost.active && ghost.mode === 2 && gameState === "PLAYING") {
-        const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
-        p.x = ghost.x;
-        p.y = ghost.y;
-        p.vx = 0; p.vy = 0;
-        const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
-        emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
-        emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
-    }
+    if(e.code === "KeyS") teleportToGhost();
 };
 window.onkeyup = e => keys[e.code] = false;
+
+function teleportToGhost() {
+    if (!ghost.active || ghost.mode !== 2 || gameState !== "PLAYING") return;
+    const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
+    p.x = ghost.x;
+    p.y = ghost.y;
+    p.vx = 0; p.vy = 0;
+    const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
+    emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
+    emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
+}
 
 function setMode(m) {
     ghost.mode = m;
     document.getElementById("m-name").innerText = MODES[m].name;
     document.getElementById("m-name").style.color = MODES[m].color;
+    modeBtn.innerHTML = "TOGGLE MODE<br>" + MODES[m].name;
+    modeBtn.style.borderColor = MODES[m].color;
+    modeBtn.style.boxShadow = "0 0 12px " + hexToRgba(MODES[m].color, 0.45);
+    teleportBtn.style.display = m === 2 ? "block" : "none";
 }
 
 function showDialog(text, speaker = "734-C") {
@@ -588,6 +850,7 @@ function update(currentTime) {
         
         timer++;
         if (gameState === "CUTSCENE_SENTENCE") {
+            setTouchControlsVisible(false);
             ctx.fillStyle = "black"; ctx.fillRect(0,0,W,H);
             ctx.fillStyle = "#f00"; ctx.font = "16px Courier New";
             if (timer > 30) ctx.fillText("> INMATE 734-C: PROCESSING...", 50, 100);
@@ -598,6 +861,7 @@ function update(currentTime) {
                 transitionLevel(0);
             }
         } else if (gameState === "PLAYING") {
+            setTouchControlsVisible(true);
             renderLevel();
         }
     }
@@ -605,9 +869,9 @@ function update(currentTime) {
 }
 
 function renderLevel() {
-    if (keys["ArrowLeft"]) p.vx -= 1.8; 
-    if (keys["ArrowRight"]) p.vx += 1.8;
-    if (keys["ArrowUp"] && p.grounded) {
+    if (keys["ArrowLeft"] || virtualInput.left) p.vx -= 1.8; 
+    if (keys["ArrowRight"] || virtualInput.right) p.vx += 1.8;
+    if ((keys["ArrowUp"] || virtualInput.jump) && p.grounded) {
         emitSplash(p.x + p.w * 0.5, p.y + p.h, 12, "#ffffff", 0.8, 4.8);
         p.vy = -20; p.grounded = false;
     }
@@ -654,6 +918,7 @@ function renderLevel() {
     }
 
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
+    teleportBtn.classList.toggle("enabled", ghost.active && ghost.mode === 2);
     if (checkSpikeCollision()) return;
     let currentMap = getMap();
     let maxX = currentMap[0].length * TILE;
@@ -851,6 +1116,7 @@ function resolve(isX) {
     }
 }
 
+setMode(0);
 requestAnimationFrame(update);
 </script>
 </body>
