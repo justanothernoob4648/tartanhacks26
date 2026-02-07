@@ -203,6 +203,75 @@ const joystick = {
     deadZone: 8
 };
 const jumpPointers = new Set();
+
+let audioCtx = null, masterGain = null;
+let ambientGainNode = null;
+let ambientPlaying = false;
+let ambientLoopTimer = null;
+const ambientProgression = [
+    {
+        chord: [50, 57, 62, 65],
+        duration: 14,
+        padGain: 1,
+        bass: [
+            { note: 38, length: 3.6, offset: 0, gain: 0.22 },
+            { note: 41, length: 3.4, offset: 4.8, gain: 0.2 },
+            { note: 45, length: 3.2, offset: 9.4, gain: 0.18 }
+        ],
+        melody: [
+            { note: 74, length: 2.4, offset: 1.6, gain: 0.14 },
+            { note: 79, length: 2.0, offset: 5.1, gain: 0.13, glideTo: 77 },
+            { note: 76, length: 2.2, offset: 8.6, gain: 0.12 }
+        ]
+    },
+    {
+        chord: [46, 53, 58, 62],
+        duration: 12,
+        padGain: 0.95,
+        bass: [
+            { note: 34, length: 3.4, offset: 0.4, gain: 0.2 },
+            { note: 39, length: 3.1, offset: 4.6, gain: 0.18 },
+            { note: 41, length: 2.9, offset: 8.5, gain: 0.16 }
+        ],
+        melody: [
+            { note: 72, length: 2.0, offset: 1.1, gain: 0.12 },
+            { note: 77, length: 1.8, offset: 4.0, gain: 0.11 },
+            { note: 74, length: 2.1, offset: 6.9, gain: 0.12, glideTo: 76 }
+        ]
+    },
+    {
+        chord: [43, 50, 55, 59],
+        duration: 13,
+        padGain: 1.05,
+        bass: [
+            { note: 31, length: 3.6, offset: 0, gain: 0.23 },
+            { note: 36, length: 3.3, offset: 4.7, gain: 0.21 },
+            { note: 38, length: 3.0, offset: 9.0, gain: 0.19 }
+        ],
+        melody: [
+            { note: 76, length: 2.3, offset: 1.3, gain: 0.13 },
+            { note: 79, length: 2.0, offset: 4.5, gain: 0.13, glideTo: 78 },
+            { note: 81, length: 2.4, offset: 7.9, gain: 0.12 }
+        ]
+    },
+    {
+        chord: [41, 48, 53, 57],
+        duration: 11,
+        padGain: 0.9,
+        bass: [
+            { note: 29, length: 3.2, offset: 0.2, gain: 0.22 },
+            { note: 33, length: 3.0, offset: 4.1, gain: 0.19 },
+            { note: 36, length: 2.7, offset: 7.4, gain: 0.17 }
+        ],
+        melody: [
+            { note: 72, length: 2.1, offset: 1.0, gain: 0.12 },
+            { note: 76, length: 1.9, offset: 3.6, gain: 0.11 },
+            { note: 69, length: 2.4, offset: 6.5, gain: 0.1, glideTo: 72 }
+        ]
+    }
+];
+const AMBIENT_LOOP_LEAD = 1.5;
+let lastFootstepFrame = -999, lastJumpFrame = -999;
 const lampPhases = {};
 function getLampPhase(c, r) {
     let key = c + "," + r;
@@ -410,6 +479,8 @@ function checkTriggers() {
 
 function transitionLevel(nextIndex) {
     if (nextIndex >= levels.length) return;
+    const previousLevel = currentLevel;
+    if (audioCtx && nextIndex > previousLevel) playSound("level");
     currentLevel = nextIndex;
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
@@ -428,6 +499,7 @@ function respawnAtLevelStart() {
     ghost.x = -100; ghost.y = -100;
     ghost.dirX = 1; ghost.dirY = 0;
     particles.length = 0;
+    playSound("respawn");
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
     let quip = respawnQuips[Math.floor(Math.random() * respawnQuips.length)];
     showDialog(quip, "734-C");
@@ -439,7 +511,223 @@ function resize() {
 }
 window.onresize = resize; resize();
 
+window.addEventListener("pointerdown", () => { ensureAudio(); startAmbientMusic(); });
+
 function rand(min, max) { return min + Math.random() * (max - min); }
+
+// Lazy-init the audio engine on first input to satisfy browser policies.
+function ensureAudio() {
+    if (audioCtx) {
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        return;
+    }
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    audioCtx = new AudioCtor();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.36;
+    masterGain.connect(audioCtx.destination);
+}
+
+function scheduleTone(freqStart, freqEnd, startOffset, duration, gainValue, type) {
+    if (!audioCtx || !masterGain) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const startTime = audioCtx.currentTime + startOffset;
+    const endTime = startTime + duration;
+
+    osc.type = type || "sine";
+    osc.frequency.setValueAtTime(freqStart, startTime);
+    if (typeof freqEnd === "number" && freqEnd !== freqStart) {
+        osc.frequency.linearRampToValueAtTime(freqEnd, endTime);
+    }
+
+    gain.gain.setValueAtTime(gainValue, startTime);
+    gain.gain.linearRampToValueAtTime(0.0001, endTime);
+
+    osc.connect(gain);
+    gain.connect(masterGain);
+
+    osc.start(startTime);
+    osc.stop(endTime + 0.05);
+}
+
+function playSound(name) {
+    if (!audioCtx || !masterGain) return;
+    switch (name) {
+        case "jump":
+            scheduleTone(240, 320, 0, 0.18, 0.11, "sine");
+            scheduleTone(360, 260, 0.02, 0.22, 0.08, "sine");
+            break;
+        case "step": {
+            const duration = 0.22;
+            const frameCount = Math.floor(audioCtx.sampleRate * duration);
+            const buffer = audioCtx.createBuffer(1, frameCount, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < frameCount; i++) {
+                let t = i / frameCount;
+                let envelope = Math.pow(1 - t, 2.6) * Math.pow(t + 0.01, 0.65);
+                data[i] = (Math.random() * 2 - 1) * envelope * 0.55;
+            }
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = "bandpass";
+            filter.frequency.value = rand(160, 240);
+            filter.Q.value = 1.3;
+            const gainNode = audioCtx.createGain();
+            const now = audioCtx.currentTime;
+            gainNode.gain.setValueAtTime(0.0001, now);
+            gainNode.gain.exponentialRampToValueAtTime(0.11, now + 0.025);
+            gainNode.gain.exponentialRampToValueAtTime(0.008, now + duration);
+            source.connect(filter);
+            filter.connect(gainNode);
+            gainNode.connect(masterGain);
+            source.start(now);
+            source.stop(now + duration + 0.03);
+            break;
+        }
+        case "swap":
+            scheduleTone(260, 330, 0, 0.22, 0.14, "sine");
+            scheduleTone(330, 210, 0.18, 0.28, 0.11, "triangle");
+            break;
+        case "level":
+            scheduleTone(210, 260, 0, 0.9, 0.07, "sine");
+            scheduleTone(280, 420, 0.05, 0.6, 0.11, "sine");
+            scheduleTone(420, 540, 0.22, 0.5, 0.1, "sine");
+            scheduleTone(560, 720, 0.38, 0.7, 0.07, "sine");
+            break;
+        case "respawn":
+            scheduleTone(520, 260, 0, 0.25, 0.16, "sine");
+            scheduleTone(220, 180, 0.12, 0.18, 0.12, "square");
+            break;
+        default:
+            break;
+    }
+}
+
+function startAmbientMusic() {
+    if (!audioCtx || !masterGain || ambientPlaying) return;
+    ambientPlaying = true;
+    if (ambientLoopTimer) { clearTimeout(ambientLoopTimer); ambientLoopTimer = null; }
+
+    const now = audioCtx.currentTime;
+    const startTime = now + 0.4;
+    ambientGainNode = audioCtx.createGain();
+    ambientGainNode.gain.setValueAtTime(0.0001, now);
+    ambientGainNode.gain.linearRampToValueAtTime(0.34, startTime + 8);
+    ambientGainNode.connect(masterGain);
+
+    scheduleAmbientCycle(startTime);
+}
+
+function scheduleAmbientCycle(startTime) {
+    if (!audioCtx || !ambientGainNode) return;
+    if (ambientLoopTimer) { clearTimeout(ambientLoopTimer); ambientLoopTimer = null; }
+    let cursor = startTime;
+    ambientProgression.forEach(step => {
+        schedulePadLayer(step, cursor);
+        scheduleBassLayer(step, cursor);
+        scheduleMelodyLayer(step, cursor);
+        cursor += step.duration;
+    });
+    const nextStart = cursor;
+    const delayMs = Math.max((nextStart - audioCtx.currentTime - AMBIENT_LOOP_LEAD) * 1000, 400);
+    ambientLoopTimer = setTimeout(() => scheduleAmbientCycle(nextStart), delayMs);
+}
+
+function schedulePadLayer(step, startTime) {
+    if (!ambientGainNode) return;
+    const padNotes = [...step.chord, ...step.chord.map(n => n - 12)];
+    padNotes.forEach((note, idx) => {
+        scheduleAmbientNote({
+            note,
+            start: startTime + idx * 0.18,
+            duration: step.duration + 4.2,
+            peak: 0.12 * (step.padGain || 1) * (idx < step.chord.length ? 1 : 0.65),
+            type: idx % 2 === 0 ? "sine" : "triangle",
+            attack: 1.4 + idx * 0.2,
+            release: 3.8,
+            pan: idx % 2 === 0 ? -0.18 : 0.18
+        });
+    });
+}
+
+function scheduleBassLayer(step, startTime) {
+    if (!step.bass || !ambientGainNode) return;
+    step.bass.forEach((ev, idx) => {
+        scheduleAmbientNote({
+            note: ev.note,
+            start: startTime + (ev.offset || 0),
+            duration: Math.max(ev.length || 3, 2.2),
+            peak: (ev.gain || 0.18),
+            type: ev.type || "sine",
+            attack: ev.attack || 0.35,
+            release: ev.release || 2.8,
+            pan: -0.1 + idx * 0.08
+        });
+    });
+}
+
+function scheduleMelodyLayer(step, startTime) {
+    if (!step.melody || !ambientGainNode) return;
+    step.melody.forEach((ev, idx) => {
+        scheduleAmbientNote({
+            note: ev.note,
+            start: startTime + (ev.offset || 0),
+            duration: Math.max(ev.length || 1.8, 1.2),
+            peak: ev.gain || 0.12,
+            type: ev.type || "sine",
+            attack: ev.attack || 0.45,
+            release: ev.release || 1.9,
+            glideTo: ev.glideTo,
+            pan: idx % 2 === 0 ? 0.24 : -0.24
+        });
+    });
+}
+
+function scheduleAmbientNote(cfg) {
+    if (!audioCtx || !ambientGainNode) return;
+    const now = audioCtx.currentTime;
+    const start = Math.max(cfg.start || now, now + 0.02);
+    const duration = Math.max(cfg.duration || 2, 0.3);
+    const attack = Math.max(cfg.attack || 0.5, 0.05);
+    const release = Math.max(cfg.release || 2.2, 0.4);
+    const peak = cfg.peak || 0.1;
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    if (audioCtx.createStereoPanner) {
+        const panner = audioCtx.createStereoPanner();
+        panner.pan.value = cfg.pan || 0;
+        gain.connect(panner);
+        panner.connect(ambientGainNode);
+    } else {
+        gain.connect(ambientGainNode);
+    }
+
+    osc.type = cfg.type || "sine";
+    if (cfg.detune) osc.detune.value = cfg.detune;
+    const baseFreq = midiToFreq(cfg.note);
+    osc.frequency.setValueAtTime(baseFreq, start);
+    if (cfg.glideTo) {
+        const glideFreq = midiToFreq(cfg.glideTo);
+        osc.frequency.linearRampToValueAtTime(glideFreq, start + duration);
+    }
+
+    gain.gain.setValueAtTime(0.0001, Math.max(start - 0.02, now));
+    gain.gain.linearRampToValueAtTime(peak, start + attack);
+    gain.gain.linearRampToValueAtTime(peak * 0.72, start + duration);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration + release);
+
+    osc.connect(gain);
+    osc.start(start);
+    osc.stop(start + duration + release + 0.5);
+}
+
+function midiToFreq(midi) {
+    return 440 * Math.pow(2, (midi - 69) / 12);
+}
 
 function hexToRgba(hex, alpha) {
     let h = hex.replace('#', '');
@@ -582,6 +870,8 @@ teleportBtn.addEventListener("click", () => {
 });
 
 window.onkeydown = e => {
+    ensureAudio();
+    startAmbientMusic();
     keys[e.code] = true;
     if(e.key === "1") setMode(0); if(e.key === "2") setMode(1); if(e.key === "3") setMode(2);
     if(e.code === "KeyS") teleportToGhost();
@@ -590,6 +880,7 @@ window.onkeyup = e => keys[e.code] = false;
 
 function teleportToGhost() {
     if (!ghost.active || ghost.mode !== 2 || gameState !== "PLAYING") return;
+    ensureAudio();
     const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
     p.x = ghost.x;
     p.y = ghost.y;
@@ -597,6 +888,7 @@ function teleportToGhost() {
     const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
     emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
     emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
+    playSound("swap");
 }
 
 function setMode(m) {
@@ -873,6 +1165,7 @@ function renderLevel() {
     if (keys["ArrowRight"] || virtualInput.right) p.vx += 1.8;
     if ((keys["ArrowUp"] || virtualInput.jump) && p.grounded) {
         emitSplash(p.x + p.w * 0.5, p.y + p.h, 12, "#ffffff", 0.8, 4.8);
+        if (timer - lastJumpFrame > 10) { playSound("jump"); lastJumpFrame = timer; }
         p.vy = -20; p.grounded = false;
     }
     p.vx *= 0.85; p.vy += 1.2;
@@ -888,6 +1181,7 @@ function renderLevel() {
             rand(0.9, 1.8),
             "#ffffff"
         );
+        if (timer - lastFootstepFrame > 9) { playSound("step"); lastFootstepFrame = timer; }
     }
     
     p.history.push({ x: p.x, y: p.y });
