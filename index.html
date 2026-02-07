@@ -182,9 +182,10 @@ const TILE = 60;
 // Reduced DELAY because at 30fps, 120 frames is 4 seconds. 
 // 60 frames = 2 seconds (original behavior).
 const DELAY = 60; 
+const COYOTE_FRAMES = 8;
 
-const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history: [] };
-const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0, springCompression: 0, springCooldown: 0 };
+const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history: [], coyote: 0 };
+const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0, springCompression: 0, springCooldown: 0, fade: 0 };
 const camera = { x: 0, y: 0 };
 const particles = [];
 const touchControls = document.getElementById("touch-controls");
@@ -489,7 +490,7 @@ function transitionLevel(nextIndex) {
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
-    p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0;
+    p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0; ghost.fade = 0;
     particles.length = 0;
     if (currentLevel > 0) document.getElementById("game-ui").style.display = "block";
 }
@@ -504,6 +505,7 @@ function respawnAtLevelStart() {
     ghost.dirX = 1; ghost.dirY = 0;
     ghost.springCompression = 0;
     ghost.springCooldown = 0;
+    ghost.fade = 0;
     particles.length = 0;
     playSound("respawn");
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
@@ -931,11 +933,48 @@ function getBounceSpringMetrics() {
     };
 }
 
+function handleBounceSpringInteraction() {
+    if (!ghost.active || ghost.mode !== 0) return;
+    const spring = getBounceSpringMetrics();
+    const springTopY = ghost.y - spring.baseHeight - spring.coilHeight - spring.headHeight;
+    const boundsX = ghost.x;
+    const boundsY = springTopY;
+    const boundsW = p.w;
+    const boundsH = (ghost.y + p.h) - springTopY;
+
+    const overlaps = p.x < boundsX + boundsW && p.x + p.w > boundsX && p.y < boundsY + boundsH && p.y + p.h > boundsY;
+    if (!overlaps || ghost.springCooldown > 0) return;
+
+    const playerBottom = p.y + p.h;
+    const triggerBand = springTopY + spring.headHeight * 1.4;
+    if (playerBottom < springTopY || playerBottom > triggerBand) return;
+
+    const alignedX = ghost.x + p.w * 0.5;
+    p.y = springTopY - p.h;
+    p.x = alignedX - p.w * 0.5;
+    p.vy = -24;
+    p.vx *= 0.9;
+    p.grounded = false;
+    ghost.springCompression = 1;
+    ghost.springCooldown = 12;
+    if (timer - lastJumpFrame > 3) {
+        playSound("jump");
+        lastJumpFrame = timer;
+    }
+}
+
 function drawDroid(x, y, isGhost) {
     ctx.save();
     let m = MODES[ghost.mode];
     let time = Date.now() * 0.005;
-    if(isGhost) { ctx.globalAlpha = 0.5; ctx.shadowBlur = 15; ctx.shadowColor = m.color; }
+    let ghostFade = 1;
+    if(isGhost) {
+        ghostFade = ghost.fade || 0;
+        if (ghostFade <= 0.001) { ctx.restore(); return; }
+        ctx.globalAlpha = 0.5 * ghostFade;
+        ctx.shadowBlur = 15 * ghostFade;
+        ctx.shadowColor = hexToRgba(m.color, Math.min(1, ghostFade));
+    }
     if (isGhost && ghost.mode === 0) {
         const spring = getBounceSpringMetrics();
         const springCenter = x + p.w * 0.5;
@@ -945,11 +984,11 @@ function drawDroid(x, y, isGhost) {
         const topPlateY = coilTopY - spring.headHeight;
         const halfWidth = spring.width * 0.5;
 
-        ctx.fillStyle = hexToRgba(m.color, 0.55);
+        ctx.fillStyle = hexToRgba(m.color, 0.55 * ghostFade);
         ctx.fillRect(springCenter - 6, baseY, 12, spring.baseHeight);
 
         ctx.save();
-        ctx.strokeStyle = hexToRgba(m.color, 0.9);
+        ctx.strokeStyle = hexToRgba(m.color, 0.9 * ghostFade);
         ctx.lineWidth = 3;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
@@ -967,9 +1006,9 @@ function drawDroid(x, y, isGhost) {
         ctx.stroke();
         ctx.restore();
 
-        ctx.fillStyle = hexToRgba(m.color, 0.95);
+        ctx.fillStyle = hexToRgba(m.color, 0.95 * ghostFade);
         ctx.fillRect(springCenter - halfWidth, topPlateY, spring.width, spring.headHeight);
-        ctx.fillStyle = hexToRgba("#ffffff", 0.12);
+        ctx.fillStyle = hexToRgba("#ffffff", 0.12 * ghostFade);
         ctx.fillRect(springCenter - halfWidth + 2, topPlateY + 1, spring.width - 4, spring.headHeight - 2);
     }
     ctx.fillStyle = isGhost ? m.color : "#1a1a1a";
@@ -1227,10 +1266,15 @@ function renderLevel() {
 
     if (keys["ArrowLeft"] || virtualInput.left) p.vx -= 1.8; 
     if (keys["ArrowRight"] || virtualInput.right) p.vx += 1.8;
-    if ((keys["ArrowUp"] || virtualInput.jump) && p.grounded) {
+    if (p.grounded) p.coyote = COYOTE_FRAMES;
+    else if (p.coyote > 0) p.coyote--;
+
+    const wantsJump = keys["ArrowUp"] || virtualInput.jump;
+    if (wantsJump && p.coyote > 0) {
         emitSplash(p.x + p.w * 0.5, p.y + p.h, 12, "#ffffff", 0.8, 4.8);
         if (timer - lastJumpFrame > 10) { playSound("jump"); lastJumpFrame = timer; }
         p.vy = -20; p.grounded = false;
+        p.coyote = 0;
     }
     p.vx *= 0.85; p.vy += 1.2;
 
@@ -1252,6 +1296,7 @@ function renderLevel() {
     document.getElementById("buff").innerText = Math.min(100, Math.floor(p.history.length/DELAY*100)) + "%";
     if (p.history.length > DELAY) {
         let past = p.history.shift();
+        const wasActive = ghost.active;
         if (ghost.active) {
             let dx = past.x - ghost.x;
             let dy = past.y - ghost.y;
@@ -1261,7 +1306,10 @@ function renderLevel() {
             }
         }
         ghost.x = past.x; ghost.y = past.y; ghost.active = true;
+        if (!wasActive) ghost.fade = 0;
     }
+    if (ghost.active) ghost.fade = Math.min(1, (ghost.fade || 0) + 0.05);
+    else ghost.fade = 0;
 
     if (ghost.active && ghost.mode === 1 && Math.random() < 0.5) {
         spawnParticle(
@@ -1276,6 +1324,7 @@ function renderLevel() {
     }
 
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
+    handleBounceSpringInteraction();
     teleportBtn.classList.toggle("enabled", ghost.active && ghost.mode === 2);
     if (checkSpikeCollision()) return;
     let currentMap = getMap();
@@ -1307,13 +1356,16 @@ function renderLevel() {
     lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, 250, 0, Math.PI*2); lbCtx.fill();
 
     if (ghost.active && ghost.mode === 1) {
-        let gRadius = 260;
-        let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius);
-        gG.addColorStop(0, "rgba(255,255,255,0.95)");
-        gG.addColorStop(0.35, "rgba(255,255,255,0.42)");
-        gG.addColorStop(0.78, "rgba(255,255,255,0.1)");
-        gG.addColorStop(1, "transparent");
-        lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius, 0, Math.PI*2); lbCtx.fill();
+        const fade = ghost.fade || 0;
+        if (fade > 0.001) {
+            let gRadius = 260;
+            let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius);
+            gG.addColorStop(0, "rgba(255,255,255," + (0.95 * fade) + ")");
+            gG.addColorStop(0.35, "rgba(255,255,255," + (0.42 * fade) + ")");
+            gG.addColorStop(0.78, "rgba(255,255,255," + (0.1 * fade) + ")");
+            gG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius, 0, Math.PI*2); lbCtx.fill();
+        }
     }
 
     let t = Date.now() * 0.001;
@@ -1352,15 +1404,18 @@ function renderLevel() {
 
     lbCtx.globalCompositeOperation = "destination-out";
     if (ghost.active && ghost.mode === 1) {
-        let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
-        let superTint = lbCtx.createRadialGradient(gx, gy - 80, 0, gx, gy, 420);
-        superTint.addColorStop(0, "rgba(255,255,255,0.24)");
-        superTint.addColorStop(0.5, "rgba(255,255,255,0.1)");
-        superTint.addColorStop(1, "transparent");
-        lbCtx.fillStyle = superTint;
-        lbCtx.beginPath();
-        lbCtx.arc(gx, gy, 420, 0, Math.PI * 2);
-        lbCtx.fill();
+        const fade = ghost.fade || 0;
+        if (fade > 0.001) {
+            let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
+            let superTint = lbCtx.createRadialGradient(gx, gy - 80, 0, gx, gy, 420);
+            superTint.addColorStop(0, "rgba(255,255,255," + (0.24 * fade) + ")");
+            superTint.addColorStop(0.5, "rgba(255,255,255," + (0.1 * fade) + ")");
+            superTint.addColorStop(1, "transparent");
+            lbCtx.fillStyle = superTint;
+            lbCtx.beginPath();
+            lbCtx.arc(gx, gy, 420, 0, Math.PI * 2);
+            lbCtx.fill();
+        }
     }
 
     for (let r = 0; r < lm.length; r++) {
@@ -1394,16 +1449,19 @@ function renderLevel() {
     ctx.globalCompositeOperation = "lighter";
 
     if (ghost.active && ghost.mode === 1) {
-        let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
-        let gGlow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 420);
-        gGlow.addColorStop(0, "rgba(255,240,180,0.42)");
-        gGlow.addColorStop(0.45, "rgba(255,225,155,0.22)");
-        gGlow.addColorStop(0.75, "rgba(255,215,145,0.08)");
-        gGlow.addColorStop(1, "transparent");
-        ctx.fillStyle = gGlow;
-        ctx.beginPath();
-        ctx.arc(gx, gy, 420, 0, Math.PI * 2);
-        ctx.fill();
+        const fade = ghost.fade || 0;
+        if (fade > 0.001) {
+            let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
+            let gGlow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 420);
+            gGlow.addColorStop(0, "rgba(255,240,180," + (0.42 * fade) + ")");
+            gGlow.addColorStop(0.45, "rgba(255,225,155," + (0.22 * fade) + ")");
+            gGlow.addColorStop(0.75, "rgba(255,215,145," + (0.08 * fade) + ")");
+            gGlow.addColorStop(1, "transparent");
+            ctx.fillStyle = gGlow;
+            ctx.beginPath();
+            ctx.arc(gx, gy, 420, 0, Math.PI * 2);
+            ctx.fill();
+        }
     }
 
     for (let r = 0; r < lm.length; r++) {
@@ -1456,24 +1514,6 @@ function resolve(isX) {
                 if (isX) { p.x = p.vx > 0 ? b.x - p.w : b.x + b.w; p.vx = 0; }
                 else { if (p.vy > 0) p.grounded = true; p.y = p.vy > 0 ? b.y - p.h : b.y + b.h; p.vy = 0; }
             }
-        }
-    }
-    if (!isX && ghost.active && ghost.mode === 0) {
-        const spring = getBounceSpringMetrics();
-        const springWidth = spring.width;
-        const springX = ghost.x + p.w * 0.5 - springWidth * 0.5;
-        const springY = ghost.y - spring.baseHeight - spring.coilHeight - spring.headHeight;
-        const springTop = { x: springX, y: springY, w: springWidth, h: spring.headHeight };
-        const overlaps = p.x < springTop.x + springTop.w && p.x + p.w > springTop.x && p.y < springTop.y + springTop.h && p.y + p.h > springTop.y;
-        if (overlaps && ghost.springCooldown <= 0 && p.vy >= 0) {
-            p.y = springTop.y - p.h;
-            p.vy = -22;
-            p.grounded = false;
-            p.vx *= 0.95;
-            ghost.springCompression = 1;
-            ghost.springCooldown = 10;
-            playSound("jump");
-            lastJumpFrame = timer;
         }
     }
 }
