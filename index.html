@@ -184,7 +184,7 @@ const TILE = 60;
 const DELAY = 60; 
 
 const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history: [] };
-const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0 };
+const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0, springCompression: 0, springCooldown: 0 };
 const camera = { x: 0, y: 0 };
 const particles = [];
 const touchControls = document.getElementById("touch-controls");
@@ -208,6 +208,10 @@ let audioCtx = null, masterGain = null;
 let ambientGainNode = null;
 let ambientPlaying = false;
 let ambientLoopTimer = null;
+const MASTER_GAIN_TARGET = 0.7;
+const AMBIENT_GAIN_TARGET = 0.55;
+const SFX_GAIN_MULT = 1.7;
+const AMBIENT_NOTE_GAIN_MULT = 1.6;
 const ambientProgression = [
     {
         chord: [50, 57, 62, 65],
@@ -485,7 +489,7 @@ function transitionLevel(nextIndex) {
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
-    p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0;
+    p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0;
     particles.length = 0;
     if (currentLevel > 0) document.getElementById("game-ui").style.display = "block";
 }
@@ -498,6 +502,8 @@ function respawnAtLevelStart() {
     ghost.active = false;
     ghost.x = -100; ghost.y = -100;
     ghost.dirX = 1; ghost.dirY = 0;
+    ghost.springCompression = 0;
+    ghost.springCooldown = 0;
     particles.length = 0;
     playSound("respawn");
     emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
@@ -525,7 +531,7 @@ function ensureAudio() {
     if (!AudioCtor) return;
     audioCtx = new AudioCtor();
     masterGain = audioCtx.createGain();
-    masterGain.gain.value = 0.36;
+    masterGain.gain.value = MASTER_GAIN_TARGET;
     masterGain.connect(audioCtx.destination);
 }
 
@@ -542,7 +548,8 @@ function scheduleTone(freqStart, freqEnd, startOffset, duration, gainValue, type
         osc.frequency.linearRampToValueAtTime(freqEnd, endTime);
     }
 
-    gain.gain.setValueAtTime(gainValue, startTime);
+    const boostedGain = Math.min(gainValue * SFX_GAIN_MULT, 1);
+    gain.gain.setValueAtTime(boostedGain, startTime);
     gain.gain.linearRampToValueAtTime(0.0001, endTime);
 
     osc.connect(gain);
@@ -578,8 +585,8 @@ function playSound(name) {
             const gainNode = audioCtx.createGain();
             const now = audioCtx.currentTime;
             gainNode.gain.setValueAtTime(0.0001, now);
-            gainNode.gain.exponentialRampToValueAtTime(0.11, now + 0.025);
-            gainNode.gain.exponentialRampToValueAtTime(0.008, now + duration);
+            gainNode.gain.exponentialRampToValueAtTime(Math.max(0.0001, Math.min(0.11 * SFX_GAIN_MULT, 1)), now + 0.025);
+            gainNode.gain.exponentialRampToValueAtTime(Math.max(0.0001, Math.min(0.008 * SFX_GAIN_MULT, 0.6)), now + duration);
             source.connect(filter);
             filter.connect(gainNode);
             gainNode.connect(masterGain);
@@ -615,7 +622,7 @@ function startAmbientMusic() {
     const startTime = now + 0.4;
     ambientGainNode = audioCtx.createGain();
     ambientGainNode.gain.setValueAtTime(0.0001, now);
-    ambientGainNode.gain.linearRampToValueAtTime(0.34, startTime + 8);
+    ambientGainNode.gain.linearRampToValueAtTime(AMBIENT_GAIN_TARGET, startTime + 8);
     ambientGainNode.connect(masterGain);
 
     scheduleAmbientCycle(startTime);
@@ -693,7 +700,7 @@ function scheduleAmbientNote(cfg) {
     const duration = Math.max(cfg.duration || 2, 0.3);
     const attack = Math.max(cfg.attack || 0.5, 0.05);
     const release = Math.max(cfg.release || 2.2, 0.4);
-    const peak = cfg.peak || 0.1;
+    const peak = Math.min((cfg.peak || 0.1) * AMBIENT_NOTE_GAIN_MULT, 0.95);
 
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
@@ -893,6 +900,10 @@ function teleportToGhost() {
 
 function setMode(m) {
     ghost.mode = m;
+    if (m !== 0) {
+        ghost.springCompression = 0;
+        ghost.springCooldown = 0;
+    }
     document.getElementById("m-name").innerText = MODES[m].name;
     document.getElementById("m-name").style.color = MODES[m].color;
     modeBtn.innerHTML = "TOGGLE MODE<br>" + MODES[m].name;
@@ -909,11 +920,58 @@ function showDialog(text, speaker = "734-C") {
     setTimeout(() => { box.style.display = "none"; }, 4500);
 }
 
+function getBounceSpringMetrics() {
+    const comp = ghost.springCompression || 0;
+    return {
+        comp,
+        coilHeight: Math.max(5, 12 - comp * 8),
+        headHeight: 6,
+        baseHeight: 5,
+        width: 18
+    };
+}
+
 function drawDroid(x, y, isGhost) {
     ctx.save();
     let m = MODES[ghost.mode];
     let time = Date.now() * 0.005;
     if(isGhost) { ctx.globalAlpha = 0.5; ctx.shadowBlur = 15; ctx.shadowColor = m.color; }
+    if (isGhost && ghost.mode === 0) {
+        const spring = getBounceSpringMetrics();
+        const springCenter = x + p.w * 0.5;
+        const baseY = y - spring.baseHeight;
+        const coilBottomY = baseY;
+        const coilTopY = coilBottomY - spring.coilHeight;
+        const topPlateY = coilTopY - spring.headHeight;
+        const halfWidth = spring.width * 0.5;
+
+        ctx.fillStyle = hexToRgba(m.color, 0.55);
+        ctx.fillRect(springCenter - 6, baseY, 12, spring.baseHeight);
+
+        ctx.save();
+        ctx.strokeStyle = hexToRgba(m.color, 0.9);
+        ctx.lineWidth = 3;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        const turns = 4;
+        const step = spring.coilHeight / turns;
+        ctx.beginPath();
+        ctx.moveTo(springCenter - halfWidth, coilBottomY);
+        for (let i = 1; i <= turns; i++) {
+            const dir = i % 2 === 1 ? 1 : -1;
+            const targetX = springCenter + dir * halfWidth;
+            const targetY = coilBottomY - step * i;
+            ctx.lineTo(targetX, targetY);
+        }
+        ctx.lineTo(springCenter, coilTopY - 1.5);
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.fillStyle = hexToRgba(m.color, 0.95);
+        ctx.fillRect(springCenter - halfWidth, topPlateY, spring.width, spring.headHeight);
+        ctx.fillStyle = hexToRgba("#ffffff", 0.12);
+        ctx.fillRect(springCenter - halfWidth + 2, topPlateY + 1, spring.width - 4, spring.headHeight - 2);
+    }
     ctx.fillStyle = isGhost ? m.color : "#1a1a1a";
     ctx.fillRect(x+4, y+38 + (isGhost?0:Math.sin(time*4)*4), 8, 10); 
     ctx.fillRect(x+22, y+38 - (isGhost?0:Math.sin(time*4)*4), 8, 10); 
@@ -1161,6 +1219,12 @@ function update(currentTime) {
 }
 
 function renderLevel() {
+    if (ghost.springCooldown > 0) ghost.springCooldown--;
+    if (ghost.springCompression > 0.001) {
+        ghost.springCompression += (0 - ghost.springCompression) * 0.18;
+        if (ghost.springCompression < 0.001) ghost.springCompression = 0;
+    }
+
     if (keys["ArrowLeft"] || virtualInput.left) p.vx -= 1.8; 
     if (keys["ArrowRight"] || virtualInput.right) p.vx += 1.8;
     if ((keys["ArrowUp"] || virtualInput.jump) && p.grounded) {
@@ -1394,18 +1458,22 @@ function resolve(isX) {
             }
         }
     }
-    if (ghost.active && ghost.mode === 0) {
-        let g = { x: ghost.x, y: ghost.y, w: p.w, h: p.h };
-        if (p.x < g.x+g.w && p.x+p.w > g.x && p.y < g.y+g.h && p.y+p.h > g.y) {
-            if (isX) {
-                p.x = p.vx > 0 ? g.x - p.w : g.x + g.w;
-                p.vx *= -0.8;
-                p.vy = Math.min(p.vy, -22);
-            } else {
-                p.y = p.vy > 0 ? g.y - p.h : g.y + g.h;
-                p.vy = p.vy > 0 ? -26 : -16;
-                p.vx *= 0.92;
-            }
+    if (!isX && ghost.active && ghost.mode === 0) {
+        const spring = getBounceSpringMetrics();
+        const springWidth = spring.width;
+        const springX = ghost.x + p.w * 0.5 - springWidth * 0.5;
+        const springY = ghost.y - spring.baseHeight - spring.coilHeight - spring.headHeight;
+        const springTop = { x: springX, y: springY, w: springWidth, h: spring.headHeight };
+        const overlaps = p.x < springTop.x + springTop.w && p.x + p.w > springTop.x && p.y < springTop.y + springTop.h && p.y + p.h > springTop.y;
+        if (overlaps && ghost.springCooldown <= 0 && p.vy >= 0) {
+            p.y = springTop.y - p.h;
+            p.vy = -22;
+            p.grounded = false;
+            p.vx *= 0.95;
+            ghost.springCompression = 1;
+            ghost.springCooldown = 10;
+            playSound("jump");
+            lastJumpFrame = timer;
         }
     }
 }
