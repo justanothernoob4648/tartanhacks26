@@ -19,7 +19,7 @@
     <div class="ui" id="game-ui" style="display:none">
         <div id="m-name" style="color:#f0f">BOUNCE</div>
         <div style="opacity: 0.5; font-size: 12px;">INMATE 734-C // TETHER: <span id="buff">0%</span></div>
-        <div style="opacity: 0.35; font-size: 10px; margin-top: 6px;">[1/2/3] MODE &nbsp; [E] PLACE ANCHOR &nbsp; [Q] SWAP</div>
+        <div style="opacity: 0.35; font-size: 10px; margin-top: 6px;">[1/2/3] MODE &nbsp; [S] TELEPORT BEHIND GHOST</div>
     </div>
     
     <div class="dialog-box" id="dialog-box">
@@ -42,8 +42,9 @@ const TILE = 60;
 const DELAY = 60; 
 
 const p = { x: 80, y: 300, vx: 0, vy: 0, w: 34, h: 48, grounded: false, history: [] };
-const ghost = { x: -100, y: -100, active: false, mode: 0, anchored: false };
+const ghost = { x: -100, y: -100, active: false, mode: 0, dirX: 1, dirY: 0 };
 const camera = { x: 0, y: 0 };
+const particles = [];
 const lampPhases = {};
 function getLampPhase(c, r) {
     let key = c + "," + r;
@@ -82,13 +83,26 @@ const TILES = {
     5: { name: "Lamp", hitbox: null, solid: false, light: true, draw(ctx,x,y) {
         ctx.fillStyle = "#444"; ctx.fillRect(x+22, y, 16, 8);
         ctx.fillStyle = "#665522"; ctx.fillRect(x+18, y+8, 24, 6);
-        ctx.fillStyle = "rgba(255,180,80,0.3)"; ctx.fillRect(x+20, y+14, 20, 4);
+        ctx.fillStyle = "rgba(255,190,95,0.38)"; ctx.fillRect(x+20, y+14, 20, 4);
     }},
     6: { name: "Vent", hitbox: null, solid: false, light: false, draw(ctx,x,y) {
         ctx.fillStyle = "#1a1a20"; ctx.fillRect(x+4, y+4, 52, 52);
         ctx.strokeStyle = "#333"; ctx.strokeRect(x+4, y+4, 52, 52);
         for (let i = 0; i < 4; i++) {
             ctx.fillStyle = "#2a2a30"; ctx.fillRect(x+8, y+10+i*12, 44, 6);
+        }
+    }},
+    7: { name: "Spikes", hitbox: null, solid: false, light: false, draw(ctx,x,y) {
+        ctx.fillStyle = "#18181d"; ctx.fillRect(x, y + 40, TILE, 20);
+        ctx.fillStyle = "#d8d8df";
+        for (let i = 0; i < 6; i++) {
+            let sx = x + i * 10;
+            ctx.beginPath();
+            ctx.moveTo(sx, y + 60);
+            ctx.lineTo(sx + 5, y + 42);
+            ctx.lineTo(sx + 10, y + 60);
+            ctx.closePath();
+            ctx.fill();
         }
     }}
 };
@@ -175,7 +189,8 @@ const levels = [
             [1,0,0,0,2,2,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,0,0,2,0,0,0,1],
             [1,0,0,0,0,0,0,0,3,0,1,0,0,3,0,0,0,3,0,0,0,0,0,0,0,0,0,3,0,0,0,0,0,0,1],
             [1,0,0,2,2,2,0,0,0,0,1,2,2,2,0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0,1],
-            [1,1,1,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,1]
+            [1,1,1,1,1,1,1,0,0,0,1,1,1,1,1,0,0,0,1,1,1,1,1,1,1,1,1,0,0,0,1,1,1,1,1],
+            [1,1,1,1,1,1,1,7,7,7,1,1,1,1,1,7,7,7,1,1,1,1,1,1,1,1,1,7,7,7,1,1,1,1,1]
         ]
     },
     {
@@ -220,6 +235,9 @@ function checkTriggers() {
                     showDialog(trig.text, trig.speaker);
                     if (trig.once) firedTriggers.add(key);
                 }
+            } else if (id === 7) {
+                respawnAtLevelStart();
+                return;
             } else if (id === 6) {
                 transitionLevel(currentLevel + 1);
             }
@@ -233,8 +251,21 @@ function transitionLevel(nextIndex) {
     let spawn = levels[currentLevel].spawn;
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
     p.vx = 0; p.vy = 0; p.grounded = false;
-    p.history = []; ghost.active = false; ghost.anchored = false; ghost.x = -100; ghost.y = -100;
+    p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0;
+    particles.length = 0;
     if (currentLevel > 0) document.getElementById("game-ui").style.display = "block";
+}
+
+function respawnAtLevelStart() {
+    let spawn = levels[currentLevel].spawn;
+    p.x = spawn.x * TILE; p.y = spawn.y * TILE;
+    p.vx = 0; p.vy = 0; p.grounded = false;
+    p.history = [];
+    ghost.active = false;
+    ghost.x = -100; ghost.y = -100;
+    ghost.dirX = 1; ghost.dirY = 0;
+    particles.length = 0;
+    emitSplash(p.x + p.w * 0.5, p.y + p.h * 0.5, 14, "#ffffff", 0.8, 3.6);
 }
 
 function resize() {
@@ -243,22 +274,57 @@ function resize() {
 }
 window.onresize = resize; resize();
 
+function rand(min, max) { return min + Math.random() * (max - min); }
+
+function spawnParticle(x, y, vx, vy, life, size, color) {
+    particles.push({ x, y, vx, vy, life, maxLife: life, size, color });
+}
+
+function emitSplash(x, y, count, color, minSpeed, maxSpeed) {
+    for (let i = 0; i < count; i++) {
+        let a = Math.random() * Math.PI * 2;
+        let s = rand(minSpeed, maxSpeed);
+        spawnParticle(x, y, Math.cos(a) * s, Math.sin(a) * s, rand(12, 28), rand(1.5, 4), color);
+    }
+}
+
+function updateAndDrawParticles() {
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let pt = particles[i];
+        pt.x += pt.vx;
+        pt.y += pt.vy;
+        pt.vx *= 0.96;
+        pt.vy = pt.vy * 0.96 + 0.03;
+        pt.life -= 1;
+        if (pt.life <= 0) { particles.splice(i, 1); continue; }
+        ctx.globalAlpha = pt.life / pt.maxLife;
+        ctx.fillStyle = pt.color;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+}
+
 window.onkeydown = e => {
     keys[e.code] = true;
     if(e.key === "1") setMode(0); if(e.key === "2") setMode(1); if(e.key === "3") setMode(2);
-    if(e.key === "e" && ghost.mode === 2 && gameState === "PLAYING") {
-        ghost.x = p.x; ghost.y = p.y; ghost.active = true; ghost.anchored = true;
-    }
-    if(e.key === "q" && ghost.mode === 2 && ghost.anchored && gameState === "PLAYING") {
-        let tx = ghost.x, ty = ghost.y;
-        ghost.x = p.x; ghost.y = p.y;
-        p.x = tx; p.y = ty; p.vx = 0; p.vy = 0;
+    if(e.code === "KeyS" && ghost.active && ghost.mode === 2 && gameState === "PLAYING") {
+        const fromX = p.x + p.w * 0.5, fromY = p.y + p.h * 0.5;
+        p.x = ghost.x;
+        p.y = ghost.y;
+        p.vx = 0; p.vy = 0;
+        const toX = p.x + p.w * 0.5, toY = p.y + p.h * 0.5;
+        emitSplash(fromX, fromY, 18, "#66ffff", 1.5, 6.5);
+        emitSplash(toX, toY, 26, "#00ffff", 2.5, 8.5);
     }
 };
 window.onkeyup = e => keys[e.code] = false;
 
 function setMode(m) {
-    if (ghost.mode === 2 && m !== 2) { ghost.anchored = false; }
     ghost.mode = m;
     document.getElementById("m-name").innerText = MODES[m].name;
     document.getElementById("m-name").style.color = MODES[m].color;
@@ -322,20 +388,59 @@ function update(currentTime) {
 function renderLevel() {
     if (keys["ArrowLeft"]) p.vx -= 1.8; 
     if (keys["ArrowRight"]) p.vx += 1.8;
-    if (keys["ArrowUp"] && p.grounded) { p.vy = -20; p.grounded = false; }
+    if (keys["ArrowUp"] && p.grounded) {
+        emitSplash(p.x + p.w * 0.5, p.y + p.h, 12, "#ffffff", 0.8, 4.8);
+        p.vy = -20; p.grounded = false;
+    }
     p.vx *= 0.85; p.vy += 1.2;
+
+    if (Math.abs(p.vx) > 0.5 && p.grounded && Math.random() < 0.6) {
+        let dir = p.vx > 0 ? -1 : 1;
+        spawnParticle(
+            p.x + p.w * 0.5 + rand(-4, 4),
+            p.y + p.h - 2 + rand(-2, 2),
+            dir * rand(0.3, 1.4),
+            rand(-0.5, -0.1),
+            rand(10, 20),
+            rand(0.9, 1.8),
+            "#ffffff"
+        );
+    }
     
     p.history.push({ x: p.x, y: p.y });
     document.getElementById("buff").innerText = Math.min(100, Math.floor(p.history.length/DELAY*100)) + "%";
-    if (ghost.mode === 2 && ghost.anchored) {
-        if (p.history.length > DELAY) p.history.shift();
-    } else {
-        if (p.history.length > DELAY) {
-            let past = p.history.shift(); ghost.x = past.x; ghost.y = past.y; ghost.active = true;
+    if (p.history.length > DELAY) {
+        let past = p.history.shift();
+        if (ghost.active) {
+            let dx = past.x - ghost.x;
+            let dy = past.y - ghost.y;
+            if (dx !== 0 || dy !== 0) {
+                ghost.dirX = dx;
+                ghost.dirY = dy;
+            }
         }
+        ghost.x = past.x; ghost.y = past.y; ghost.active = true;
+    }
+
+    if (ghost.active && ghost.mode === 1 && Math.random() < 0.5) {
+        spawnParticle(
+            ghost.x + 17 + rand(-12, 12),
+            ghost.y + 24 + rand(-10, 10),
+            rand(-0.2, 0.2),
+            rand(-0.9, -0.25),
+            rand(16, 34),
+            rand(1, 2.3),
+            "#ffe36a"
+        );
     }
 
     p.x += p.vx; resolve(true); p.y += p.vy; p.grounded = false; resolve(false);
+    let currentMap = getMap();
+    let maxX = currentMap[0].length * TILE;
+    let maxY = currentMap.length * TILE;
+    if (p.x < -TILE * 2 || p.x > maxX + TILE * 2 || p.y < -TILE * 4 || p.y > maxY + TILE * 3) {
+        respawnAtLevelStart();
+    }
     camera.x += (p.x - W/2 - camera.x) * 0.1; camera.y += (p.y - H/2 - camera.y) * 0.1;
 
     checkTriggers();
@@ -346,18 +451,22 @@ function renderLevel() {
     if (ghost.active) drawDroid(ghost.x, ghost.y, true);
     drawDroid(p.x, p.y, false);
     ctx.restore();
+    updateAndDrawParticles();
 
     lbCtx.globalCompositeOperation = "source-over";
-    lbCtx.fillStyle = "rgba(0,0,0,0.85)"; lbCtx.fillRect(0,0,W,H);
+    lbCtx.fillStyle = "rgba(0,0,0,0.22)"; lbCtx.fillRect(0,0,W,H);
     lbCtx.globalCompositeOperation = "destination-out";
     let pG = lbCtx.createRadialGradient(p.x-camera.x+17, p.y-camera.y+24, 0, p.x-camera.x+17, p.y-camera.y+24, 250);
     pG.addColorStop(0, "white"); pG.addColorStop(1, "transparent");
     lbCtx.fillStyle = pG; lbCtx.beginPath(); lbCtx.arc(p.x-camera.x+17, p.y-camera.y+24, 250, 0, Math.PI*2); lbCtx.fill();
 
     if (ghost.active && ghost.mode === 1) {
-        let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, 1200);
-        gG.addColorStop(0, "rgba(255,255,0,1)"); gG.addColorStop(0.5, "rgba(255,255,0,0.4)"); gG.addColorStop(1, "transparent");
-        lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, 1200, 0, Math.PI*2); lbCtx.fill();
+        let gRadius = 260;
+        let gG = lbCtx.createRadialGradient(ghost.x-camera.x+17, ghost.y-camera.y+24, 0, ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius);
+        gG.addColorStop(0, "rgba(255,250,215,1)");
+        gG.addColorStop(0.6, "rgba(255,240,190,0.42)");
+        gG.addColorStop(1, "transparent");
+        lbCtx.fillStyle = gG; lbCtx.beginPath(); lbCtx.arc(ghost.x-camera.x+17, ghost.y-camera.y+24, gRadius, 0, Math.PI*2); lbCtx.fill();
     }
 
     let t = Date.now() * 0.001;
@@ -368,24 +477,62 @@ function renderLevel() {
             let lx = c * TILE + 30 - camera.x, ly = r * TILE + 30 - camera.y;
             if (lx < -300 || lx > W + 300 || ly < -300 || ly > H + 300) continue;
             let phase = getLampPhase(c, r);
-            let radius = 220 + 60 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
-            let lampG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, radius);
-            lampG.addColorStop(0, "white"); lampG.addColorStop(0.6, "rgba(255,255,255,0.4)"); lampG.addColorStop(1, "transparent");
-            lbCtx.fillStyle = lampG; lbCtx.beginPath(); lbCtx.arc(lx, ly, radius, 0, Math.PI * 2); lbCtx.fill();
+            let coneHeight = 340 + 60 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
+            let coneHalfWidth = 85 + 20 * Math.sin(t * 2.5 + phase * 1.1);
+            let lampG = lbCtx.createLinearGradient(lx, ly - 10, lx, ly + coneHeight);
+            lampG.addColorStop(0, "rgba(255,245,220,0.88)");
+            lampG.addColorStop(0.35, "rgba(255,230,195,0.45)");
+            lampG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = lampG;
+            lbCtx.beginPath();
+            lbCtx.moveTo(lx, ly - 6);
+            lbCtx.lineTo(lx - coneHalfWidth, ly + coneHeight);
+            lbCtx.lineTo(lx + coneHalfWidth, ly + coneHeight);
+            lbCtx.closePath();
+            lbCtx.fill();
+
+            let bulbG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, 55);
+            bulbG.addColorStop(0, "rgba(255,245,215,0.95)");
+            bulbG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = bulbG;
+            lbCtx.beginPath();
+            lbCtx.arc(lx, ly, 55, 0, Math.PI * 2);
+            lbCtx.fill();
         }
     }
 
     lbCtx.globalCompositeOperation = "source-over";
+    if (ghost.active && ghost.mode === 1) {
+        let gx = ghost.x - camera.x + 17, gy = ghost.y - camera.y + 24;
+        let superTint = lbCtx.createRadialGradient(gx, gy - 80, 0, gx, gy, 420);
+        superTint.addColorStop(0, "rgba(255,230,175,0.26)");
+        superTint.addColorStop(0.5, "rgba(255,210,155,0.1)");
+        superTint.addColorStop(1, "transparent");
+        lbCtx.fillStyle = superTint;
+        lbCtx.beginPath();
+        lbCtx.arc(gx, gy, 420, 0, Math.PI * 2);
+        lbCtx.fill();
+    }
+
     for (let r = 0; r < lm.length; r++) {
         for (let c = 0; c < lm[r].length; c++) {
             if (lm[r][c] !== 5) continue;
             let lx = c * TILE + 30 - camera.x, ly = r * TILE + 30 - camera.y;
-            if (lx < -300 || lx > W + 300 || ly < -300 || ly > H + 300) continue;
+            if (lx < -400 || lx > W + 400 || ly < -100 || ly > H + 400) continue;
             let phase = getLampPhase(c, r);
-            let radius = 220 + 60 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
-            let tintG = lbCtx.createRadialGradient(lx, ly, 0, lx, ly, radius);
-            tintG.addColorStop(0, "rgba(255,153,64,0.18)"); tintG.addColorStop(0.5, "rgba(255,153,64,0.06)"); tintG.addColorStop(1, "transparent");
-            lbCtx.fillStyle = tintG; lbCtx.beginPath(); lbCtx.arc(lx, ly, radius, 0, Math.PI * 2); lbCtx.fill();
+            let coneHeight = 350 + 50 * Math.sin(t * 3.7 + phase) * Math.sin(t * 2.3 + phase * 1.7);
+            let coneHalfWidth = 100 + 18 * Math.sin(t * 2.5 + phase * 1.1);
+            let tintG = lbCtx.createLinearGradient(lx, ly - 10, lx, ly + coneHeight);
+            tintG.addColorStop(0, "rgba(255,220,175,0.26)");
+            tintG.addColorStop(0.5, "rgba(255,200,150,0.11)");
+            tintG.addColorStop(1, "transparent");
+            lbCtx.fillStyle = tintG;
+            lbCtx.beginPath();
+            lbCtx.moveTo(lx, ly - 8);
+            lbCtx.lineTo(lx - coneHalfWidth, ly + coneHeight);
+            lbCtx.lineTo(lx + coneHalfWidth, ly + coneHeight);
+            lbCtx.closePath();
+            lbCtx.fill();
         }
     }
 
@@ -407,15 +554,17 @@ function resolve(isX) {
             }
         }
     }
-    if (ghost.active && ghost.mode !== 1) {
+    if (ghost.active && ghost.mode === 0) {
         let g = { x: ghost.x, y: ghost.y, w: p.w, h: p.h };
         if (p.x < g.x+g.w && p.x+p.w > g.x && p.y < g.y+g.h && p.y+p.h > g.y) {
-            if (ghost.mode === 0) {
-                if (isX) { p.x = p.vx > 0 ? g.x - p.w : g.x + g.w; p.vx *= -1.8; }
-                else { p.y = p.vy > 0 ? g.y - p.h : g.y + g.h; p.vy *= -1.8; }
-            } else if (ghost.mode === 2) {
-                if (isX) { p.x = p.vx > 0 ? g.x - p.w : g.x + g.w; p.vx = 0; }
-                else { if (p.vy > 0) p.grounded = true; p.y = p.vy > 0 ? g.y - p.h : g.y + g.h; p.vy = 0; }
+            if (isX) {
+                p.x = p.vx > 0 ? g.x - p.w : g.x + g.w;
+                p.vx *= -0.8;
+                p.vy = Math.min(p.vy, -22);
+            } else {
+                p.y = p.vy > 0 ? g.y - p.h : g.y + g.h;
+                p.vy = p.vy > 0 ? -26 : -16;
+                p.vx *= 0.92;
             }
         }
     }
