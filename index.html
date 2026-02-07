@@ -276,6 +276,16 @@ window.onresize = resize; resize();
 
 function rand(min, max) { return min + Math.random() * (max - min); }
 
+function hexToRgba(hex, alpha) {
+    let h = hex.replace('#', '');
+    if (h.length === 3) h = h.split('').map(ch => ch + ch).join('');
+    let num = parseInt(h, 16);
+    let r = (num >> 16) & 255;
+    let g = (num >> 8) & 255;
+    let b = num & 255;
+    return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
+}
+
 function spawnParticle(x, y, vx, vy, life, size, color) {
     particles.push({ x, y, vx, vy, life, maxLife: life, size, color });
 }
@@ -359,6 +369,93 @@ function drawDroid(x, y, isGhost) {
 function drawEnvironment(cell, c, r) {
     if (cell === 0) return;
     TILES[cell].draw(ctx, c * TILE, r * TILE);
+}
+
+function drawArrowHead(x, y, angle, size, color, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-size, size * 0.6);
+    ctx.lineTo(-size, -size * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+}
+
+// Draw the predicted ghost path with animated arrow markers.
+function drawGhostTrajectoryWorld() {
+    if (p.history.length < 2) return;
+    let maxFrames = Math.min(p.history.length, Math.floor(fps * 2));
+    if (maxFrames < 2) return;
+
+    let baseColor = MODES[ghost.mode].color;
+    let lineColor = hexToRgba(baseColor, 0.32);
+    let arrowColor = hexToRgba(baseColor, 0.7);
+
+    let startPoint;
+    if (ghost.active && ghost.x > -50) {
+        startPoint = { x: ghost.x + p.w * 0.5, y: ghost.y + p.h * 0.5 };
+    } else if (p.history.length > 0) {
+        startPoint = { x: p.history[0].x + p.w * 0.5, y: p.history[0].y + p.h * 0.5 };
+    } else {
+        startPoint = { x: p.x + p.w * 0.5, y: p.y + p.h * 0.5 };
+    }
+
+    let points = [startPoint];
+    for (let i = 0; i < maxFrames; i++) {
+        let pt = p.history[i];
+        points.push({ x: pt.x + p.w * 0.5, y: pt.y + p.h * 0.5 });
+    }
+
+    ctx.save();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = lineColor;
+    ctx.setLineDash([12, 14]);
+    ctx.lineDashOffset = -Date.now() * 0.18;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    let arrowSpacing = 52;
+    let arrowPhase = (Date.now() * 0.22) % arrowSpacing;
+    let nextArrow = arrowPhase;
+    let totalLen = 0;
+    const timePulse = Date.now() * 0.006;
+
+    for (let i = 1; i < points.length; i++) {
+        let p0 = points[i - 1];
+        let p1 = points[i];
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let segLen = Math.hypot(dx, dy);
+        if (segLen < 0.01) { totalLen += segLen; continue; }
+
+        if (nextArrow < totalLen) {
+            let catchUp = Math.floor((totalLen - nextArrow) / arrowSpacing) + 1;
+            nextArrow += catchUp * arrowSpacing;
+        }
+
+        while (nextArrow <= totalLen + segLen) {
+            let t = (nextArrow - totalLen) / segLen;
+            if (t < 0 || t > 1) break;
+            let ax = p0.x + dx * t;
+            let ay = p0.y + dy * t;
+            let angle = Math.atan2(dy, dx);
+            let pulse = 1 + 0.22 * Math.sin(timePulse + nextArrow * 0.05);
+            drawArrowHead(ax, ay, angle, 6.5 * pulse, arrowColor, Math.min(0.85, 0.58 + 0.16 * pulse));
+            nextArrow += arrowSpacing;
+        }
+
+        totalLen += segLen;
+    }
+
+    ctx.restore();
 }
 
 function update(currentTime) {
@@ -448,6 +545,7 @@ function renderLevel() {
     ctx.fillStyle = "#030305"; ctx.fillRect(0,0,W,H);
     ctx.save(); ctx.translate(-camera.x, -camera.y);
     getMap().forEach((row, r) => row.forEach((cell, c) => drawEnvironment(cell, c, r)));
+    drawGhostTrajectoryWorld();
     if (ghost.active) drawDroid(ghost.x, ghost.y, true);
     drawDroid(p.x, p.y, false);
     ctx.restore();
