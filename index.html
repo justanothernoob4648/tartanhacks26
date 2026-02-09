@@ -289,6 +289,8 @@ let ambientPlaying = false;
 let ambientLoopTimer = null;
 let dialogHideTimer = null;
 const canvasDialog = { text: "", ttl: 0, maxTtl: 0 };
+let pendingModeToggleTipAfterDialog = false;
+let pendingMoveTipAfterIntroDialog = false;
 let cellNoiseStarted = false;
 let cellNoiseDone = false;
 let cellNoiseMain = null;
@@ -559,11 +561,11 @@ const levels = [
         name: "MAINTENANCE RUN",
         spawn: { x: 1, y: 8 },
         triggers: {
-            "2,8": { text: "More hallways, more bad architecture. And what's with the lasers? Jeez.", speaker: "734-C", once: true },
+            "2,8": { text: "What's with the lasers and crazy layout of shelves? Jeez.", speaker: "734-C", once: true },
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,6,1],
+            [1,0,0,0,5,0,0,0,5,0,0,0,5,0,0,0,6,1],
             [1,0,0,0,0,0,0,0,0,0,0,2,2,0,0,0,0,1],
             [1,0,0,0,2,2,0,0,0,0,0,0,0,0,3,0,0,1],
             [1,0,0,0,0,0,0,3,0,0,2,2,0,0,0,0,0,1],
@@ -578,7 +580,7 @@ const levels = [
         name: "COOLANT LIFT",
         spawn: { x: 2, y: 11 },
         triggers: {
-            "7,6": { text: "This is a two man job... but there's nobody else but me...", speaker: "734-C", once: true }
+            "7,6": { text: "That vent's high up!. Looks like a two man job... but I've only got myself...", speaker: "734-C", once: true }
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1],
@@ -603,7 +605,7 @@ const levels = [
         darknessAlpha: 0.9,
         moduleBeacon: true,
         triggers: {
-            "2,7": { text: "Why is this room pitch black? And what is that glowing thing?.", speaker: "734-C", once: true },
+            "1,7": { text: "Looks like the lights are off... What's with that glowing thing though?", speaker: "734-C", once: true },
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
@@ -638,9 +640,13 @@ const levels = [
         spawn: { x: 1, y: 9 },
         bgColor: "#13161d",
         darknessAlpha: 0.5,
+        columnTriggers: {
+            2: "2,9",
+            20: "20,9"
+        },
         triggers: {
             "2,9": { text: "The cafeteria... empty. No trays. No voices. Just the hum of old lights. Where is everyone?", speaker: "734-C", once: true },
-            "26,9": { text: "Keep moving.", speaker: "734-C", once: true }
+            "20,9": { text: "Keep moving.", speaker: "734-C", once: true }
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
@@ -654,16 +660,18 @@ const levels = [
     },
     {
         name: "THE DOOR",
-        spawn: { x: 2, y: 5 },
+        spawn: { x: 2, y: 4 },
         isFinalLevel: true,
+        columnTriggers: {
+            3: "4,5"
+        },
         triggers: {
             "4,5": { text: "There it is. The door out. I can't believe it's right there.", speaker: "734-C", once: true }
         },
         map: [
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
-            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,0,0,0,0,5,0,0,0,0,0,5,0,0,0,0,0,5,0,0,0,0,0,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
             [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
@@ -751,8 +759,16 @@ function checkTriggers() {
     if (py < 0 || py >= m.length || px < 0 || px >= m[py].length) return;
 
     let triggerKey = px + "," + py;
-    let firedKey = currentLevel + ":" + triggerKey;
     let trig = level.triggers[triggerKey];
+    if (!trig && level.columnTriggers) {
+        const columnTriggerKey = level.columnTriggers[px];
+        if (columnTriggerKey && level.triggers[columnTriggerKey]) {
+            triggerKey = columnTriggerKey;
+            trig = level.triggers[columnTriggerKey];
+        }
+    }
+
+    let firedKey = currentLevel + ":" + triggerKey;
     if (trig && !firedTriggers.has(firedKey)) {
         showDialog(trig.text, trig.speaker);
         if (trig.once) firedTriggers.add(firedKey);
@@ -787,6 +803,8 @@ function transitionLevel(nextIndex) {
     currentLevel = nextIndex;
     let spawn = getSpawnTileForLevel(currentLevel);
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
+    camera.x = p.x - W / 2;
+    camera.y = p.y - H / 2;
     p.vx = 0; p.vy = 0; p.grounded = false;
     p.coyoteFrames = 0;
     p.history = []; ghost.active = false; ghost.x = -100; ghost.y = -100; ghost.dirX = 1; ghost.dirY = 0; ghost.springCompression = 0; ghost.springCooldown = 0; ghost.fadeIn = 0;
@@ -801,6 +819,8 @@ function transitionLevel(nextIndex) {
 function respawnAtLevelStart() {
     let spawn = getSpawnTileForLevel(currentLevel);
     p.x = spawn.x * TILE; p.y = spawn.y * TILE;
+    camera.x = p.x - W / 2;
+    camera.y = p.y - H / 2;
     p.vx = 0; p.vy = 0; p.grounded = false;
     p.coyoteFrames = 0;
     p.history = [];
@@ -899,7 +919,7 @@ function maybeStartCellNoiseSequence() {
     if (cellNoiseDone || cellNoiseStarted) return;
     cellNoiseStarted = true;
     startCellNoiseAudioLayer();
-    showDialog("*Indistinct Chatter Outside Cell*", "SYSTEM", 8400);
+    showDialog("*Indistinct chatter outside cell*", "SYSTEM", 8400);
     cellNoiseBabbleTimer = setInterval(() => {
         if (!audioCtx || cellNoiseDone) return;
         scheduleTone(rand(130, 320), rand(160, 480), 0, rand(0.08, 0.2), rand(0.018, 0.042), "triangle");
@@ -925,10 +945,11 @@ function maybeStartCellNoiseSequence() {
         const box = document.getElementById("dialog-box");
         box.style.display = "none";
         setTimeout(() => {
-            showDialog("What was that? Did the guards finally leave?", "734-C");
+            showDialog("What's with the sudden silence? Did the guards finally leave?", "734-C");
         }, 1100);
         setTimeout(() => {
             showDialog("Time to put my plan into motion and follow the vents to freedom!", "734-C");
+            pendingMoveTipAfterIntroDialog = true;
         }, 7900);
         setTimeout(() => {
             startAmbientMusic();
@@ -1047,8 +1068,34 @@ function stopAmbientMusic() {
 
 function initiateTrap() {
     trapState = "SPRINGING";
-    cageX = p.x + p.w * 0.5 - cageWidth * 0.5;
-    cageY = (Math.floor(p.y / TILE) + 1) * TILE - cageHeight;
+    const levelMap = getMap();
+    const mapWidthTiles = levelMap[0].length;
+    const playerMidX = p.x + p.w * 0.5;
+    const maxCageX = mapWidthTiles * TILE - cageWidth;
+    cageX = Math.max(0, Math.min(playerMidX - cageWidth * 0.5, maxCageX));
+    const sampleCol = Math.max(0, Math.min(Math.floor(playerMidX / TILE), mapWidthTiles - 1));
+
+    const feetRow = Math.max(0, Math.min(levelMap.length - 1, Math.floor((p.y + p.h) / TILE)));
+    let floorRow = -1;
+    for (let r = feetRow; r < levelMap.length; r++) {
+        const id = sampleCol < levelMap[r].length ? levelMap[r][sampleCol] : 1;
+        if (TILES[id] && TILES[id].solid) {
+            floorRow = r;
+            break;
+        }
+    }
+    if (floorRow < 0) {
+        for (let r = levelMap.length - 1; r >= 0; r--) {
+            const id = sampleCol < levelMap[r].length ? levelMap[r][sampleCol] : 1;
+            if (TILES[id] && TILES[id].solid) {
+                floorRow = r;
+                break;
+            }
+        }
+    }
+    if (floorRow < 0) floorRow = levelMap.length - 1;
+
+    cageY = Math.max(0, floorRow * TILE - cageHeight);
     cageAnimProgress = 0;
     ghostFrozenX = ghost.x;
     ghostFrozenY = ghost.y;
@@ -1445,12 +1492,14 @@ jumpBtn.addEventListener("contextmenu", e => e.preventDefault());
 modeBtn.addEventListener("click", () => {
     cycleToNextUnlockedMode();
 });
-modeBtn.addEventListener("pointerdown", e => {
-    // On mobile while joystick pointer is active, click may not fire reliably.
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    if (e.pointerType !== "mouse") e.preventDefault();
-    cycleToNextUnlockedMode();
-});
+
+// modeBtn.addEventListener("pointerdown", e => {
+//     // On mobile while joystick pointer is active, click may not fire reliably.
+//     if (e.pointerType === "mouse" && e.button !== 0) return;
+//     if (e.pointerType !== "mouse") e.preventDefault();
+//     cycleToNextUnlockedMode();
+// });
+
 teleportBtn.addEventListener("click", () => {
     teleportToGhost();
 });
@@ -1534,8 +1583,9 @@ function unlockModeFromModule(modeIndex) {
     playSound("swap");
     if (modeIndex === 1) {
         showDialog("Woah, let there be light! Looks like a new module, past me is glowing!");
+        pendingModeToggleTipAfterDialog = true;
     } else if (modeIndex === 2) {
-        showDialog("Anchor module is up. Safety net engaged.", "734-C");
+        showDialog("Anchor module is unlocked. Press 's' to teleport to tether", "734-C");
     }
     return true;
 }
@@ -1730,7 +1780,7 @@ function drawExitDoor() {
 
 function drawCage() {
     if (trapState === "NONE") return;
-    const floorY = 6 * TILE;
+    const floorY = cageY + cageHeight;
     const barCount = 8;
     const barSpacing = cageWidth / (barCount - 1);
     const barH = cageHeight * Math.min(1, cageAnimProgress);
@@ -2133,6 +2183,14 @@ function renderLevel() {
     camera.x += (p.x - W/2 - camera.x) * 0.1; camera.y += (p.y - H/2 - camera.y) * 0.1;
 
     checkTriggers();
+    if (pendingModeToggleTipAfterDialog && canvasDialog.ttl <= 0) {
+        showHeadCallout("Tip: Use number keys (1-3) to toggle unlocked modes", "#ffe36a", 150);
+        pendingModeToggleTipAfterDialog = false;
+    }
+    if (pendingMoveTipAfterIntroDialog && canvasDialog.ttl <= 0) {
+        showHeadCallout("Tip: Use arrow keys to move", "#ffffff", 140);
+        pendingMoveTipAfterIntroDialog = false;
+    }
 
     if (trapState === "SWAPPED" && !firedTriggers.has("final:passCage") && p.x > cageX + cageWidth) {
         showDialog("...", "734-C", 3000);
@@ -2144,6 +2202,7 @@ function renderLevel() {
         endingTimer = 0;
         endingPhase = 0;
         p.vx = 0; p.vy = 0;
+        document.getElementById("game-ui").style.display = "none";
         startAmbientMusic(true);
     }
 
@@ -2377,7 +2436,7 @@ function renderLevel() {
             ctx.fillStyle = "#f00"; ctx.font = "16px Courier New";
             ctx.fillText("> TETHER STATUS: SEVERED", 50, H / 2 - 20);
             if (endingTimer > 30) {
-                ctx.fillText("> INMATE 734-C: RELEASED", 50, H / 2 + 10);
+                ctx.fillText("> INMATE 734-C: ESCAPED", 50, H / 2 + 10);
             }
             if (endingTimer >= 180) { endingPhase = 3; endingTimer = 0; }
         } else if (endingPhase === 3) {
